@@ -53,6 +53,24 @@ Pliki `.gz` serwuj bez `Content-Encoding` - klient rozpakowuje je sam.
 3. [`run_pipeline.mjs`](pipeline/run_pipeline.mjs) buduje adresy i grafy, liczy manifest i uruchamia bramki jakości ([`gates.mjs`](pipeline/gates.mjs)): kompletność powiatów, zmiana liczby punktów względem poprzedniego wydania, znane adresy, zgodność klucza ulicy z wtyczką, trasy kontrolne, rozmiary plików, rozdział licencji.
 4. Wydanie powstaje tylko przy wszystkich zielonych bramkach. Czerwona bramka nie publikuje nic, a użytkownicy zostają na poprzednich danych.
 
+## Struktura
+
+| Krok | Plik | Co robi |
+|---|---|---|
+| - | `pipeline/run_pipeline.mjs` | uruchamia kroki po kolei; padnięty krok zatrzymuje publikację |
+| 1 | `pipeline/fetch.py` | pobiera PRG i OSM, z wznawianiem i sumami kontrolnymi |
+| 2 | `pipeline/prg_read.py` | czyta punkty adresowe z `POLSKA.zip` strumieniowo, bez rozpakowania na dysk |
+| 3 | `pipeline/osm_extract.py` | wydziela z OSM drogi samochodowe, granice i próbkę adresów do kontroli |
+| 3b | `pipeline/areas.py`, `pipeline/areas_config.json` | zamienia listę miast i aglomeracji na obszary grafu z buforem |
+| 4 | `pipeline/addr_build.mjs`, `pipeline/addr_format.mjs` | buduje pliki adresów per powiat i ich format binarny |
+| 5 | `pipeline/graph_build.mjs`, `pipeline/graph_format.mjs` | buduje grafy obszarów i graf krajowy |
+| 6 | `pipeline/manifest.mjs` | składa katalog wydania i manifest z sumami |
+| 7 | `pipeline/gates.mjs` | bramki jakości na gotowych plikach |
+| - | `pipeline/router.mjs`, `pipeline/normalize.mjs`, `pipeline/common.mjs` | trasy (do bramek), klucze nazw ulic i miejscowości, wspólne narzędzia |
+| - | `pipeline/fixtures/` | dane testowe bramek: znane adresy, pary kluczy ulic, liczniki startowe |
+| - | `pipeline/private_fixtures.mjs` | zapisuje prywatne dane testowe z sekretu runnera (adresy z ofert nie leżą w repo) |
+| - | `pipeline/falsify.mjs`, `pipeline/falsify_prg.py`, `pipeline/falsify_hooks/` | testy bramek: psują wejście i sprawdzają, że publikacja staje |
+
 [`falsify.mjs`](pipeline/falsify.mjs) celowo psuje wejście albo gotowe pliki ([`falsify_hooks/`](pipeline/falsify_hooks)) i sprawdza, że bramki zatrzymują publikację.
 
 ## Budowa lokalna
