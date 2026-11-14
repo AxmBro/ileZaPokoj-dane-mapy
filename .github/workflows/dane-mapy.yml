@@ -1,0 +1,91 @@
+# Miesieczna budowa danych mapy ileZaPokoj: adresy PRG + grafy drog OSM, 20 bramek jakosci, wydanie jako GitHub Release.
+# Serwer sam pobiera najnowsze wydanie (model "pull") - workflow nie ma zadnego klucza do serwera. Czerwona bramka = brak wydania, serwer i uzytkownicy zostaja na poprzednich danych.
+name: dane-mapy
+
+on:
+  schedule:
+    # 8. dnia miesiaca: plik miesieczny Geofabrik z 1. dnia juz jest. Minuta inna niz :00, bo o pelnych godzinach
+    # GitHub przy obciazeniu porzuca runy; drugi termin 11. dnia dziala tylko, gdy ten miesiac nie ma jeszcze wydania.
+    - cron: "17 3 8 * *"
+    - cron: "17 3 11 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dane-mapy
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.done.outputs.skip }}
+    steps:
+      - id: done
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          month=$(date -u +%Y%m)
+          tags=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName -q '.[].tagName')
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && echo "$tags" | grep -q "^dane-${month}"; then
+            echo "Wydanie z ${month} juz jest - pomijam."
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.skip != '1'
+    runs-on: ubuntu-latest
+    # Pelny przebieg ok. 40 min, szczyt ok. 4,1 GB RAM i 7,7 GB dysku (pomiar lokalny 2026-11-07).
+    timeout-minutes: 150
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Miejsce na dysku
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+      - name: Zaleznosci Python
+        run: python -m pip install --target pylib -r pipeline/requirements.txt
+      - name: Prywatne fixture bramek
+        env:
+          PRIVATE_FIXTURES: ${{ secrets.PRIVATE_FIXTURES }}
+        run: node pipeline/private_fixtures.mjs
+      # Odniesieniem bramek delta sa liczniki poprzedniego wydania; pierwsze wydanie bierze fixtures/prev_counts_gml.json.
+      - name: Liczniki poprzedniego wydania
+        run: |
+          if gh release download --repo "$GITHUB_REPOSITORY" --pattern counts.json --dir prev; then
+            echo "PREV_ARG=--prev=prev/counts.json" >> "$GITHUB_ENV"
+          fi
+      - name: Budowa z bramkami
+        run: node pipeline/run_pipeline.mjs --pylib=pylib --publish=out $PREV_ARG
+      - name: Wydanie
+        run: |
+          dir=$(date -u +%Y%m%d-%H%M%S)
+          mkdir -p release
+          cp -r out/current "release/$dir"
+          tar -cf "dane-$dir.tar" -C release "$dir"
+          sha256sum "dane-$dir.tar" > "dane-$dir.tar.sha256"
+          cp out/current/counts.json counts.json
+          snapshot=$(node -p "require('./out/current/manifest.json').snapshot")
+          gh release create "dane-$dir" "dane-$dir.tar" "dane-$dir.tar.sha256" counts.json \
+            --title "Dane mapy $dir" \
+            --notes "Zrodla: $snapshot. Adresy: PRG (GUGiK, CC BY 4.0). Grafy drog: (c) OpenStreetMap contributors, ODbL 1.0."
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: raporty-${{ github.run_id }}
+          path: |
+            build/run-*/run_status.json
+            build/run-*/gates_report.json
+            build/run-*/logs/
+          retention-days: 35
