@@ -9,10 +9,27 @@ GEOFABRIK = 'https://download.geofabrik.de/europe/'
 UA = {'User-Agent': 'ileZaPokoj-data-pipeline/1.0 (monthly data build)'}
 
 
+def with_retry(fn, url):
+    """Krotkie zapytanie kontrolne (HEAD, `.md5`) z 3 probami: chwilowy blad sieci runnera (np. `Network is
+    unreachable`) nie moze przerwac budowy po kilkunastu minutach pobierania. HTTP 4xx/5xx przechodzi od razu."""
+    for attempt in range(1, 4):
+        try:
+            return fn()
+        except urllib.error.HTTPError:
+            raise
+        except OSError as e:
+            if attempt == 3:
+                raise
+            print(f'{url}: proba {attempt}: {e}', flush=True)
+            time.sleep(15 * attempt)
+
+
 def head(url):
-    req = urllib.request.Request(url, method='HEAD', headers=UA)
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return int(r.headers.get('Content-Length') or 0), r.headers.get('Last-Modified') or '', r.headers.get('ETag') or ''
+    def once():
+        req = urllib.request.Request(url, method='HEAD', headers=UA)
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return int(r.headers.get('Content-Length') or 0), r.headers.get('Last-Modified') or '', r.headers.get('ETag') or ''
+    return with_retry(once, url)
 
 
 def osm_month_url():
@@ -46,8 +63,10 @@ SOURCES = {
 
 def md5_of(url):
     """Suma z pliku `.md5` obok danych Geofabrik (format `md5  nazwa`)."""
-    with urllib.request.urlopen(urllib.request.Request(url + '.md5', headers=UA), timeout=60) as r:
-        return r.read().decode('ascii').split()[0].lower()
+    def once():
+        with urllib.request.urlopen(urllib.request.Request(url + '.md5', headers=UA), timeout=60) as r:
+            return r.read().decode('ascii').split()[0].lower()
+    return with_retry(once, url)
 
 
 def fetch_once(url, part, etag, size):
