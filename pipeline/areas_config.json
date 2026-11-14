@@ -1,0 +1,15 @@
+{
+ "note": "Obszary grafu drog. top20 = miasta z najwiekszym popytem na pokoje; capital = stolice wojewodztw spoza top20; academic = miasta z uczelnia publiczna lub filia spoza obu list; agglomerations = jeden graf dla kilku gmin.",
+ "bufferM": 3000,
+ "coverageM": 1500,
+ "cities": {
+  "top20": ["Warszawa","Kraków","Poznań","Wrocław","Lublin","Rzeszów","Łódź","Białystok","Gdańsk","Katowice","Kielce","Szczecin","Zielona Góra","Bydgoszcz","Toruń","Olsztyn","Opole","Gdynia","Koszalin","Bielsko-Biała"],
+  "capital": ["Gorzów Wielkopolski"],
+  "academic": ["Częstochowa","Radom","Gliwice","Sosnowiec","Tarnów","Nowy Sącz","Rybnik","Płock","Elbląg","Kalisz","Legnica","Wałbrzych","Słupsk","Siedlce","Włocławek","Zamość","Chełm","Biała Podlaska","Jelenia Góra","Konin","Leszno","Gniezno","Piła","Krosno","Przemyśl","Łomża","Suwałki","Ciechanów","Skierniewice","Nysa","Tychy","Ostrołęka"]
+ },
+ "agglomerations": {
+  "aglo-warszawa": ["Warszawa","powiat legionowski","powiat otwocki","powiat piaseczyński","powiat pruszkowski","powiat warszawski zachodni","powiat wołomiński","powiat grodziski"],
+  "aglo-gzm": ["Będzin","Bieruń","Bobrowniki","Bojszowy","Bytom","Chełm Śląski","Chorzów","Czeladź","Dąbrowa Górnicza","Gierałtowice","Gliwice","Imielin","Katowice","Kobiór","Knurów","Lędziny","Łaziska Górne","Mikołów","Mierzęcice","Mysłowice","Ornontowice","Ożarowice","Piekary Śląskie","Pilchowice","Psary","Pyskowice","Radzionków","Ruda Śląska","Rudziniec","Siemianowice Śląskie","Siewierz","Sławków","Sosnowiec","Sośnicowice","Świerklaniec","Świętochłowice","Tarnowskie Góry","Tychy","Wojkowice","Wyry","Zabrze","Zbrosławice"],
+  "aglo-trojmiasto": ["Gdańsk","Gdynia","Sopot","Rumia","Reda","Wejherowo","gmina Wejherowo","gmina Kosakowo","Pruszcz Gdański","gmina Pruszcz Gdański","gmina Żukowo","gmina Kolbudy","gmina Szemud"]
+ }
+}

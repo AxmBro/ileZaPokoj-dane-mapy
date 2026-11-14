@@ -1,0 +1,3 @@
+osmium==4.3.2
+shapely==2.2.0
+inflate64==1.0.4
