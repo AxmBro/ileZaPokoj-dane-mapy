@@ -1,0 +1,13 @@
+# Pobrania (ok. 2,7 GB), biblioteki Pythona i wyniki przebiegów - odtwarzalne, nie w repo
+dl/
+pylib/
+build/
+out/
+release/
+prev/
+results/
+__pycache__/
+*.tar
+*.tar.sha256
+# Adresy z prawdziwych ofert OLX - tylko sekret PRIVATE_FIXTURES, nigdy w repo
+pipeline/fixtures/private/
