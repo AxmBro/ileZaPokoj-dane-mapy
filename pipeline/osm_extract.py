@@ -101,7 +101,7 @@ def parse_restriction(o, st):
         # Bez zwyklego tagu zostaja zakazy innych pojazdow i godzinowe (restriction:conditional).
         st['otherVehicleOrTimed'] += 1
         return []
-    if RESTRICTION_MODES & set((t.get('except') or '').split(';')):
+    if RESTRICTION_MODES & {v.strip() for v in (t.get('except') or '').split(';')}:
         st['exceptCar'] += 1
         return []
     value = values[-1]
