@@ -28,7 +28,8 @@ const MIN_SCC_POWIAT = 70;
 // Nawrot kosztuje 20 s i skret o 180 stopni; legalne obejscie przez wezly tego samego skrzyzowania (3-metrowe laczniki) ok. 16 s.
 const U_TURN_EXTRA_S = 25;
 const TURN_SAMPLE = 500;
-const MAX_LOST_SHARE = 0.002;
+// Pomiar 387 obszarow (2026-11): najwiecej 0,31% - przejscie graniczne, gdzie jedyny wjazd z polskiej strony jest zakazany.
+const MAX_LOST_SHARE = 0.01;
 // Promien mniejszy niz odstep sasiednich mostow tej samej rzeki, wiekszy niz odstep dwoch jezdni i przesuniecie srodka po podziale drogi.
 const BRIDGE_NEAR_M = 60;
 const MAX_BRIDGES_LOST = 0.02;
