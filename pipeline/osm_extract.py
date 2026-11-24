@@ -3,6 +3,7 @@
 # Wynik w <outdir>:
 #   ways.bin        drogi dla aut, rekord binarny (format nizej, czyta graph_build.mjs)
 #   node_flags.bin  wezly z bariera lub sygnalizacja: float64 id + uint8 flaga (1 blokada, 2 sygnalizacja)
+#   restrictions.json zakazy skretu z wezlem via: {only, from, via, to} (id drog i wezla OSM)
 #   boundaries.json granice administracyjne PL z teryt:terc (kraj, powiaty, gminy), uproszczone
 #   osm_addr_sample.ndjson  co N-ty adres OSM, tylko material kontrolny bramek, nigdy nie trafia do plikow addr
 #   osm_extract_stats.json  liczniki wejscia do bramek
@@ -39,6 +40,10 @@ YES_ACCESS = {'yes', 'permissive', 'designated', 'destination', 'public'}
 SPEED_MAP = {'PL:urban': 50, 'PL:rural': 90, 'PL:living_street': 20, 'PL:motorway': 140, 'PL:expressway': 120, 'PL:zone30': 30, 'PL:zone:30': 30}
 BARRIER_PASS = {'cattle_grid', 'border_control', 'toll_booth', 'sally_port', 'gate', 'lift_gate', 'no', 'entrance', 'height_restrictor', 'arch'}
 SERVICE_MINOR = {'driveway', 'parking_aisle', 'alley', 'parking'}
+# Reguly relacji restriction jak w restriction_parser.cpp OSRM (commit 746c97c): no_* i only_*, bez *_on_red, wyjatek
+# dla auta pomija relacje, wiele from tylko w no_entry, wiele to tylko w no_exit. Zakazy warunkowe i via-way sa pominiete.
+RESTRICTION_KEYS = ('restriction', 'restriction:motorcar', 'restriction:motor_vehicle', 'restriction:vehicle')
+RESTRICTION_MODES = {'motorcar', 'motor_vehicle', 'vehicle'}
 ADDR_SAMPLE_EVERY = 37  # liczba pierwsza, zeby nie rezonowac z kolejnoscia importow
 
 
@@ -88,11 +93,49 @@ def edge_props(t, hw):
     return fw, bw, spd, pen, bool(hw == 'service' and svc in SERVICE_MINOR)
 
 
-# Przebieg 1: relacje granic. Tylko relacje, czytane z pominieciem blokow wezlow.
-rels = []
-wayset = set()
-for o in osmium.FileProcessor(pbf, osmium.osm.RELATION).with_filter(osmium.filter.TagFilter(('boundary', 'administrative'))):
+def parse_restriction(o, st):
+    """Lista zakazow {only, from, via, to} z relacji; pusta, gdy relacja nie dotyczy aut albo jest poza zakresem."""
     t = o.tags
+    values = [t[k] for k in RESTRICTION_KEYS if k in t]
+    if not values:
+        # Bez zwyklego tagu zostaja zakazy innych pojazdow i godzinowe (restriction:conditional).
+        st['otherVehicleOrTimed'] += 1
+        return []
+    if RESTRICTION_MODES & set((t.get('except') or '').split(';')):
+        st['exceptCar'] += 1
+        return []
+    value = values[-1]
+    only = value.startswith('only_')
+    if '@' in value or t.get('day_on') or t.get('hour_on'):
+        st['conditional'] += 1
+        return []
+    if not only and not (value.startswith('no_') and not value.endswith('_on_red')):
+        st['unknownValue'] += 1
+        return []
+    frm = [m.ref for m in o.members if m.role == 'from' and m.type == 'w']
+    to = [m.ref for m in o.members if m.role == 'to' and m.type == 'w']
+    via_nodes = [m.ref for m in o.members if m.role == 'via' and m.type == 'n']
+    if any(m.role == 'via' and m.type == 'w' for m in o.members):
+        st['viaWay'] += 1
+        return []
+    if (not frm or not to or len(via_nodes) != 1 or (len(frm) > 1 and not value.startswith('no_entry'))
+            or (len(to) > 1 and not value.startswith('no_exit'))):
+        st['malformed'] += 1
+        return []
+    st['only' if only else 'no'] += 1
+    return [{'only': only, 'from': a, 'via': via_nodes[0], 'to': b} for a in frm for b in to]
+
+
+# Przebieg 1: relacje granic i zakazow. Tylko relacje, czytane z pominieciem blokow wezlow.
+rels = []
+restrictions = []
+rstats = {k: 0 for k in ('no', 'only', 'viaWay', 'conditional', 'otherVehicleOrTimed', 'exceptCar', 'unknownValue', 'malformed')}
+wayset = set()
+for o in osmium.FileProcessor(pbf, osmium.osm.RELATION).with_filter(osmium.filter.TagFilter(('boundary', 'administrative'), ('type', 'restriction'))):
+    t = o.tags
+    if t.get('type') == 'restriction':
+        restrictions.extend(parse_restriction(o, rstats))
+        continue
     lvl = t.get('admin_level')
     terc = t.get('teryt:terc')
     country = lvl == '2' and t.get('ISO3166-1') == 'PL'
@@ -103,7 +146,7 @@ for o in osmium.FileProcessor(pbf, osmium.osm.RELATION).with_filter(osmium.filte
     rels.append({'id': o.id, 'lvl': lvl, 'name': t.get('name'), 'terc': terc or '', 'outer': outer, 'inner': inner})
     wayset.update(outer)
     wayset.update(inner)
-log('relacje granic', len(rels), 'drog granic', len(wayset))
+log('relacje granic', len(rels), 'drog granic', len(wayset), 'zakazy', len(restrictions), json.dumps(rstats))
 
 # Przebieg 2: geometria drog, granice, adresy kontrolne, bariery. Jeden przebieg, indeks na dysku.
 geom = {}
@@ -112,7 +155,7 @@ nout = open(os.path.join(outdir, 'node_flags.bin'), 'wb')
 aout = open(os.path.join(outdir, 'osm_addr_sample.ndjson'), 'w', encoding='utf8')
 stats = {'ways': 0, 'wayRefs': 0, 'waysSkippedBadLoc': 0, 'nodesFlagged': 0, 'addrSeen': 0, 'addrSample': 0, 'classCount': {c: 0 for c in CLASSES}}
 idx_path = os.path.join(outdir, '_nodes.idx')
-HDR = struct.Struct('<dBBfI')  # way id, klasa, flagi (1 fw, 2 bw, 4 kara service, 8 service drobny), predkosc, liczba wezlow
+HDR = struct.Struct('<dBBfI')  # way id, klasa, flagi (1 fw, 2 bw, 4 kara service, 8 service drobny, 16 most), predkosc, liczba wezlow
 
 
 def sample_addr(kind, oid, lon, lat, t):
@@ -177,7 +220,7 @@ for o in fp:
             sample_addr('w', oid, sum(coords[0::2]) / k / 1e7, sum(coords[1::2]) / k / 1e7, t)
         if p is not None and len(ids) >= 2:
             fw, bw, spd, pen, minor = p
-            flags = (1 if fw else 0) | (2 if bw else 0) | (4 if pen != 1 else 0) | (8 if minor else 0)
+            flags = (1 if fw else 0) | (2 if bw else 0) | (4 if pen != 1 else 0) | (8 if minor else 0) | (16 if t.get('bridge', 'no') != 'no' else 0)
             wout.write(HDR.pack(oid, CLASS_ID[hw], flags, spd, len(ids)))
             wout.write(ids.tobytes())
             wout.write(coords.tobytes())
@@ -225,8 +268,10 @@ if stats['ways'] < 500000 or sum(1 for b in boundaries if b['lvl'] == '6') < 370
     print(f"GATE:osm-input drog {stats['ways']}, powiatow {sum(1 for b in boundaries if b['lvl'] == '6')}", flush=True)
     sys.exit(3)
 stats['boundariesFailed'] = failed
+stats['restrictions'] = rstats
 stats['seconds'] = round(time.time() - t0)
 json.dump(boundaries, open(os.path.join(outdir, 'boundaries.json'), 'w', encoding='utf8'), ensure_ascii=False)
+json.dump(restrictions, open(os.path.join(outdir, 'restrictions.json'), 'w', encoding='utf8'))
 json.dump(stats, open(os.path.join(outdir, 'osm_extract_stats.json'), 'w', encoding='utf8'), indent=1)
 pyres.write_res(os.path.join(outdir, 'res.json'), seconds=stats['seconds'], indexBytes=stats['indexBytes'])
 log('gotowe', json.dumps({k: stats[k] for k in ('ways', 'wayRefs', 'boundaries', 'addrSeen', 'addrSample')}), 'bez poligonu', len(failed))
