@@ -11,7 +11,7 @@
 
 // Stawki `process_turn` z car.lua OSRM (commit 746c97c), ruch prawostronny, bez `oncoming_turn_penalty` (z nim czas
 // odstaje od wzorca bardziej: pomiar na 40 parach).
-const TURN_PENALTY_S = 7.5;
+export const TURN_PENALTY_S = 7.5;
 const TURN_BIAS = 1.075;
 const U_TURN_S = 20;
 // Krotszy odcinek nie miesci zawracajacego auta, a w OSM sa kikuty po 2-5 m (wjazd do bramy), ktorymi trasa obchodzila zakaz.
