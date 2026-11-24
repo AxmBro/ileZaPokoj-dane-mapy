@@ -23,6 +23,10 @@ const MIN_POWIAT_RATE = 0.5;
 const MAX_INPUT_AGE_DAYS = 45;
 // Relacji restriction dla aut w Polsce jest ok. 43 tys. (2026-11); polowa tego = obciete wejscie.
 const MIN_RESTRICTIONS = 20000;
+// Bufor powiatu nad woda (Zalew Szczecinski) obejmuje drugi brzeg bez mostu w pliku; drogi samego powiatu pilnuje coverage-snap.
+const MIN_SCC_POWIAT = 70;
+// Nawrot kosztuje 20 s i skret o 180 stopni; legalne obejscie przez wezly tego samego skrzyzowania (3-metrowe laczniki) ok. 16 s.
+const U_TURN_EXTRA_S = 25;
 const TURN_SAMPLE = 500;
 const MAX_LOST_SHARE = 0.002;
 // Tryb alarmu stalych par: naturalna zmiennosc m/m jest nieznana, wiec pierwsze trzy wydania formatu 2 tylko ostrzegaja.
@@ -431,7 +435,7 @@ gate("graph-sanity", "puste lub rozsypane miasto, ucieta siec, skok rozmiaru", "
   // Inny bufor = inny wybor drog, wiec liczba wezlow nie mowi nic o ubytku; delta wraca od nastepnego wydania.
   const sameBuffer = (prev.bufferM ?? 3000) === graphStats.bufferM;
   for (const r of GRAPH_LIST) {
-    if (r.nodes < 500 || r.sccMainPct < 80 || !r.portals) bad.push(`${r.area}:nodes=${r.nodes},scc=${r.sccMainPct},portale=${r.portals}`);
+    if (r.nodes < 500 || r.sccMainPct < (r.kind === "powiat" ? MIN_SCC_POWIAT : 80) || !r.portals) bad.push(`${r.area}:nodes=${r.nodes},scc=${r.sccMainPct},portale=${r.portals}`);
     const p = prevGraph[r.area];
     if (p && sameBuffer && (r.nodes / p < 0.9 || r.nodes / p > 1.15)) bad.push(`${r.area}:wezly ${r.nodes} wobec ${p}`);
   }
@@ -580,7 +584,7 @@ gate("turn-count", "zgubione zakazy: brak relacji w wejsciu, zle numery wezlow w
   detail.turnCount = { total, prevTotal, compared, input, usable };
   return { ok: !bad.length && input >= MIN_RESTRICTIONS && share >= 0.8 && (!prevTotal || compared / prevTotal >= 0.95), info: `zakazy w plikach ${total}, wobec poprzednich ${prevTotal ? (compared / prevTotal).toFixed(3) : "-"}, relacje uzyte ${usable}/${input}, zle pliki: ${bad.slice(0, 6).join(" ") || "-"}` };
 });
-// Metoda Grasera (2014): trasa od srodka drogi wjazdu do srodka drogi wyjazdu musi byc dluzsza niz zakazany manewr o > 10 m.
+// Metoda Grasera (2014): trasa od srodka drogi wjazdu do srodka drogi wyjazdu nie moze byc zakazanym manewrem.
 // Liczona wyszukiwarka wtyczki na pliku ze stage, wiec lapie tez blad algorytmu. 100%, bo to test kodu, nie danych.
 gate("turn-legal", "zakazany manewr w trasie", "zakazu, ktorego nie ma w OSM", () => {
   let tested = 0;
@@ -595,12 +599,15 @@ gate("turn-legal", "zakazany manewr w trasie", "zakazu, ktorego nie ma w OSM", (
       search.run({ snap: { e, f: 0.5, back: -1 }, limit: half + 30 });
       const res = search.read({ e: o, f: 0.5, back: -1 });
       tested += 1;
-      if (res && res[1] <= (g.Ln[e] + g.Ln[o]) / 2 + 10) bad.push(`${r.area}:${e}-${o}`);
+      const extra = res ? res[1] - (g.Ln[e] + g.Ln[o]) / 2 : Infinity;
+      // Wprost = dlugosc manewru co do metra; do 10 m wiecej tylko nawrotem w kikucie. Reszta to legalne obejscie.
+      if (extra < 1 || (extra <= 10 && res[2] - (g.T[e] + g.T[o]) / 2 >= U_TURN_EXTRA_S)) bad.push(`${r.area}:${e}-${o}`);
     }
   }
   return { ok: tested >= 1000 && !bad.length, info: `manewry ${tested}, zlamane ${bad.length} ${bad.slice(0, 6).join(" ")}` };
 });
-// Zakazy i brak zawracania nie moga odcinac drog, ktore bez nich byly osiagalne.
+// Zakazy i brak zawracania nie moga odcinac drog, ktore bez nich byly osiagalne. Tylko zasieg pliku: przy krawedzi bufora
+// jedyny legalny dojazd bywa poza plikiem, a user tam punktu nie ma.
 gate("turn-reach", "zakazy odcinajace czesc miasta", "gorszej trasy przy zachowanej osiagalnosci", () => {
   const bad = [];
   let lost = 0;
@@ -610,10 +617,15 @@ gate("turn-reach", "zakazy odcinajace czesc miasta", "gorszej trasy przy zachowa
     // Start z wezla o srodkowym numerze: skladowa glowna jest silnie spojna, wiec bez zakazow dochodzi wszedzie.
     search.run({ nodes: [[g.n >> 1, 0, 0, 0]] });
     let n = 0;
-    for (let u = 0; u < g.n; u += 1) if (!search.node(u)) n += 1;
+    let inside = 0;
+    for (let u = 0; u < g.n; u += 1) {
+      if (!g.covers(g.lat[u], g.lon[u])) continue;
+      inside += 1;
+      if (!search.node(u)) n += 1;
+    }
     lost += n;
-    all += g.n;
-    if (n / g.n > MAX_LOST_SHARE) bad.push(`${r.area}:${((100 * n) / g.n).toFixed(2)}%`);
+    all += inside;
+    if (n / inside > MAX_LOST_SHARE) bad.push(`${r.area}:${((100 * n) / inside).toFixed(2)}%`);
   }
   return { ok: !bad.length, info: `wezly nieosiagalne ${lost}/${all} = ${((100 * lost) / all).toFixed(3)}%, ponad prog: ${bad.slice(0, 6).join(" ") || "-"}` };
 });
