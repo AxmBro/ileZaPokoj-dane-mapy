@@ -18,6 +18,7 @@ fs.mkdirSync(outDir, { recursive: true });
 const COARSE_MAX_CLASS = 7;
 const COARSE_TERTIARY_MAX_CLASS = 9;
 const SIGNAL_S = 2;
+const NO_SNAP_MAX_CLASS = 1; // motorway, motorway_link: dom nie ma z nich wjazdu
 const BUFFER_RASTER = 0.002; // stopnie, ok. 140-220 m; rozdzielczosc wyboru drog do obszaru
 
 // 1. Wczytanie drog do tablic typowanych. Rekord: <d way id><B klasa><B flagi><f predkosc><I n><d id * n><i lon, lat * n>.
@@ -38,6 +39,7 @@ const wayClass = new Uint8Array(nw);
 const wayFlags = new Uint8Array(nw);
 const waySpeed = new Float32Array(nw);
 const wayStart = new Uint32Array(nw + 1);
+const wayIdx = new Map();
 const refId = new Float64Array(refs);
 const refLon = new Int32Array(refs);
 const refLat = new Int32Array(refs);
@@ -45,6 +47,7 @@ const refLat = new Int32Array(refs);
   let p = 0;
   let r = 0;
   for (let w = 0; w < nw; w += 1) {
+    wayIdx.set(raw.readDoubleLE(p), w);
     wayClass[w] = raw[p + 8];
     wayFlags[w] = raw[p + 9];
     waySpeed[w] = raw.readFloatLE(p + 10);
@@ -122,6 +125,73 @@ for (let w = 0; w < nw; w += 1) {
 }
 log(`wezly ${nodeCount}`);
 
+// Zakazy skretu po wezle krajowym: [only, droga wjazdu, droga wyjazdu] (indeksy drog). Droga nie dla aut = zakaz bez znaczenia.
+const restrictionsAt = new Map();
+const restrictionCount = { input: 0, usable: 0 };
+for (const r of readJson(path.join(osmDir, "restrictions.json"))) {
+  restrictionCount.input += 1;
+  const from = wayIdx.get(r.from);
+  const to = wayIdx.get(r.to);
+  const via = findNode(r.via);
+  if (from === undefined || to === undefined || via < 0) continue;
+  restrictionCount.usable += 1;
+  const list = restrictionsAt.get(via);
+  if (list) list.push([r.only, from, to]);
+  else restrictionsAt.set(via, [[r.only, from, to]]);
+}
+log(`zakazy ${restrictionCount.usable} z ${restrictionCount.input}`);
+
+// Zakazy na krawedziach grafu skroconego: trojki (u, v, w). Niejednoznaczne (droga przechodzi przez wezel via na wylot,
+// wiec nie wiadomo, ktora strona) sa pomijane i liczone. only_* bez drogi docelowej w pliku (granica obszaru) nie blokuje
+// reszty wyjazdow. from = to oznacza zakaz zawracania: tylko powrot ta sama droga.
+function bansOf(n, m, eu, ev, first, last, globalIdx) {
+  const st = { mapped: 0, ambiguous: 0, missing: 0 };
+  const seen = new Set();
+  const triples = [];
+  const add = (u, v, w) => {
+    const k = `${u},${v},${w}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    triples.push(u, v, w);
+  };
+  const off = new Int32Array(n + 1);
+  for (let e = 0; e < m; e += 1) off[eu[e] + 1] += 1;
+  for (let i = 0; i < n; i += 1) off[i + 1] += off[i];
+  const inOff = new Int32Array(n + 1);
+  for (let e = 0; e < m; e += 1) inOff[ev[e] + 1] += 1;
+  for (let i = 0; i < n; i += 1) inOff[i + 1] += inOff[i];
+  const pos = inOff.slice();
+  const inE = new Int32Array(m);
+  for (let e = 0; e < m; e += 1) inE[pos[ev[e]]++] = e;
+  for (let v = 0; v < n; v += 1) {
+    const list = restrictionsAt.get(globalIdx[v]);
+    if (!list) continue;
+    const ins = Array.from(inE.subarray(inOff[v], inOff[v + 1]));
+    const outs = [];
+    for (let e = off[v]; e < off[v + 1]; e += 1) outs.push(e);
+    for (const [only, from, to] of list) {
+      const a = ins.filter((e) => last[e] === from);
+      const b = outs.filter((e) => first[e] === to);
+      if (!a.length || !b.length) {
+        st.missing += 1;
+      } else if (from === to) {
+        if (only) st.ambiguous += 1;
+        else {
+          st.mapped += 1;
+          for (const e of a) if (b.some((o) => ev[o] === eu[e])) add(eu[e], v, eu[e]);
+        }
+      } else if (a.length > 1 || b.length > 1) {
+        st.ambiguous += 1;
+      } else {
+        st.mapped += 1;
+        if (!only) add(eu[a[0]], v, ev[b[0]]);
+        else for (const o of outs) if (o !== b[0]) add(eu[a[0]], v, ev[o]);
+      }
+    }
+  }
+  return { triples: Int32Array.from(triples), stats: st };
+}
+
 const morton = (x, y) => {
   let r = 0;
   let p = 1;
@@ -161,6 +231,7 @@ function buildGraph(wayList, keepMask) {
   const segT = new Float32Array(refSum);
   const segW = new Float32Array(refSum);
   const segFlag = new Uint8Array(refSum);
+  const segWay = new Int32Array(refSum);
   let S = 0;
   let droppedBarrier = 0;
   const local = (g) => {
@@ -202,6 +273,7 @@ function buildGraph(wayList, keepMask) {
       segT[S] = tt;
       segW[S] = tt / pen;
       segFlag[S] = (fw ? 1 : 0) | (bw ? 2 : 0);
+      segWay[S] = w;
       S += 1;
       prev = cur;
       prevG = curG;
@@ -340,6 +412,9 @@ function buildGraph(wayList, keepMask) {
   let eL = new Float32Array(eCap);
   let eW = new Float32Array(eCap);
   let eT = new Float32Array(eCap);
+  const eFirst = new Int32Array(eCap);
+  const eLast = new Int32Array(eCap);
+  const eNs = new Uint8Array(eCap);
   let E = 0;
   for (let n = 0; n < N0; n += 1) {
     if (comp[n] !== main || removable[n]) continue;
@@ -350,6 +425,8 @@ function buildGraph(wayList, keepMask) {
       let l = segL[s];
       let w = segW[s];
       let t = segT[s];
+      const firstWay = segWay[s];
+      let noSnap = wayClass[firstWay] <= NO_SNAP_MAX_CLASS;
       if (isSignal(cur)) {
         w += SIGNAL_S;
         t += SIGNAL_S;
@@ -363,6 +440,7 @@ function buildGraph(wayList, keepMask) {
         l += segL[s];
         w += segW[s];
         t += segT[s];
+        if (wayClass[segWay[s]] <= NO_SNAP_MAX_CLASS) noSnap = true;
         prev = cur;
         cur = out.to[nextE];
         if (isSignal(cur)) {
@@ -377,6 +455,9 @@ function buildGraph(wayList, keepMask) {
       eL[E] = l;
       eW[E] = w;
       eT[E] = t;
+      eFirst[E] = firstWay;
+      eLast[E] = segWay[s];
+      eNs[E] = noSnap ? 1 : 0;
       E += 1;
     }
   }
@@ -418,6 +499,9 @@ function buildGraph(wayList, keepMask) {
   const fl = new Float32Array(E);
   const fw = new Float32Array(E);
   const ft = new Float32Array(E);
+  const first = new Int32Array(E);
+  const last = new Int32Array(E);
+  const ns = new Uint8Array(E);
   let m = 0;
   for (let i = 0; i < E; i += 1) {
     const o = order[i];
@@ -427,6 +511,9 @@ function buildGraph(wayList, keepMask) {
     fl[m] = eL[o];
     fw[m] = eW[o];
     ft[m] = eT[o];
+    first[m] = eFirst[o];
+    last[m] = eLast[o];
+    ns[m] = eNs[o];
     m += 1;
   }
   const latE5 = new Int32Array(n);
@@ -438,8 +525,9 @@ function buildGraph(wayList, keepMask) {
     latE5[i] = Math.round(nodeLat[g] / 100);
     lonE5[i] = Math.round(nodeLon[g] / 100);
   }
+  const bans = bansOf(n, m, fu, fv, first, last, globalIdx);
   return {
-    n, m, latE5, lonE5, eu: fu, ev: fv, el: fl, ew: fw, et: ft, globalIdx,
+    n, m, latE5, lonE5, eu: fu, ev: fv, el: fl, ew: fw, et: ft, ens: ns, bans: bans.triples, banStats: bans.stats, globalIdx,
     rawNodes: N0, rawSegments: S, droppedBarrier, sccCount: compCount, sccMainPct: Math.round((1e4 * mainSize) / N0) / 100,
   };
 }
@@ -526,17 +614,31 @@ function coverageOf(geo) {
 const areas = readJson(areasFile);
 const snapshot = areas.snapshot || "";
 const results = [];
+// Dlugie mosty glownych drog (do tertiary_link): srodek w 1e-4 stopnia, do bramki `bridges`.
+const BRIDGE_FLAG = 16;
+const BRIDGE_MAX_CLASS = 9;
+const BRIDGE_MIN_M = 80;
+const bridges = [];
+for (let w = 0; w < nw; w += 1) {
+  if (!(wayFlags[w] & BRIDGE_FLAG) || wayClass[w] > BRIDGE_MAX_CLASS) continue;
+  const cos = Math.cos((refLat[wayStart[w]] / 1e7) * (Math.PI / 180));
+  let m = 0;
+  for (let r = wayStart[w] + 1; r < wayStart[w + 1]; r += 1) m += Math.hypot((refLat[r] - refLat[r - 1]) * 0.011132, (refLon[r] - refLon[r - 1]) * 0.011132 * cos);
+  if (m < BRIDGE_MIN_M) continue;
+  const mid = (wayStart[w] + wayStart[w + 1]) >> 1;
+  bridges.push([Math.round(refLat[mid] / 1000), Math.round(refLon[mid] / 1000)]);
+}
 const attribution = "OpenStreetMap contributors, ODbL 1.0";
 
 function finish(slug, kind, g, cover, portals, extra = {}) {
-  const header = { format: 1, area: slug, kind, snapshot, attribution, ...(cover ? { coverage: cover.meta } : {}), ...extra };
+  const header = { format: 2, area: slug, kind, snapshot, attribution, ...(cover ? { coverage: cover.meta } : {}), ...extra };
   const { file, storedBoth, storedOneway } = encodeGraph(g, header, cover?.encoded, portals);
   const gz = gzip(file);
   const name = `graph-${slug}.bin.gz`;
   fs.writeFileSync(path.join(outDir, name), gz);
   const rec = {
     file: name, area: slug, kind, nodes: g.n, edges: g.m, rawNodes: g.rawNodes, rawSegments: g.rawSegments, droppedBarrier: g.droppedBarrier,
-    sccCount: g.sccCount, sccMainPct: g.sccMainPct, raw: file.length, gzip: gz.length, sha256: sha256(gz), storedBoth, storedOneway,
+    bans: g.bans.length / 3, banStats: g.banStats, sccCount: g.sccCount, sccMainPct: g.sccMainPct, raw: file.length, gzip: gz.length, sha256: sha256(gz), storedBoth, storedOneway,
     portals: portals ? portals.length / 2 : 0, coverageBytes: cover ? cover.encoded.length : 0, coverageCells: cover ? cover.meta.cellsSet : 0,
     coverage: cover ? { ...cover.meta, rle: cover.encoded.toString("base64") } : null,
   };
@@ -563,7 +665,7 @@ for (let i = 0; i < coarse.n; i += 1) {
 const variantsOut = {};
 if (variants) {
   const v = buildGraph(tertiaryWays, null);
-  const { file } = encodeGraph(v, { format: 1, area: "coarse-tertiary" }, null, null);
+  const { file } = encodeGraph(v, { format: 2, area: "coarse-tertiary" }, null, null);
   variantsOut.coarseTertiary = { nodes: v.n, edges: v.m, raw: file.length, gzip: gzip(file).length, sccMainPct: v.sccMainPct };
   log("zgrubny z tertiary", JSON.stringify(variantsOut.coarseTertiary));
 }
@@ -584,7 +686,7 @@ for (const a of areas.areas) {
   rec.terc = a.terc;
   if (variants) {
     const g2 = buildGraph(list.filter((w) => !(wayFlags[w] & 8)), keepMask);
-    const { file } = encodeGraph(g2, { format: 1, area: a.slug }, cover.encoded, null);
+    const { file } = encodeGraph(g2, { format: 2, area: a.slug }, cover.encoded, null);
     variantsOut.noServiceMinor[a.slug] = { nodes: g2.n, edges: g2.m, raw: file.length, gzip: gzip(file).length };
   }
   log(`${a.slug}: drogi ${list.length}, wezly ${g.n}, krawedzie ${g.m}, gzip ${rec.gzip}, portale ${rec.portals}, SCC ${g.sccMainPct}%, ${rec.buildMs} ms`);
@@ -595,19 +697,19 @@ if (powiatsArg) {
   const all = [];
   for (let w = 0; w < nw; w += 1) all.push(w);
   const g = buildGraph(all, null);
-  const { file } = encodeGraph(g, { format: 1, area: "polska" }, null, null);
+  const { file } = encodeGraph(g, { format: 2, area: "polska" }, null, null);
   variantsOut.nationalFull = { nodes: g.n, edges: g.m, raw: file.length, gzip: gzip(file).length, sccMainPct: g.sccMainPct, rawNodes: g.rawNodes };
   log("caly kraj", JSON.stringify(variantsOut.nationalFull));
   const rows = [];
   for (const a of readJson(powiatsArg).areas) {
     const gp = buildGraph(selectWays(a.buffer), keepMask);
-    const e = encodeGraph(gp, { format: 1, area: a.slug }, null, null);
+    const e = encodeGraph(gp, { format: 2, area: a.slug }, null, null);
     rows.push({ area: a.slug, nodes: gp.n, raw: e.file.length, gzip: gzip(e.file).length, sccMainPct: gp.sccMainPct });
   }
   rows.sort((x, y) => y.gzip - x.gzip);
   variantsOut.perPowiat = { files: rows.length, gzip: rows.reduce((s, r) => s + r.gzip, 0), raw: rows.reduce((s, r) => s + r.raw, 0), max: rows[0], median: rows[rows.length >> 1], min: rows[rows.length - 1] };
   log("powiaty", JSON.stringify(variantsOut.perPowiat));
 }
-writeJson(path.join(outDir, "graph_stats.json"), { snapshot, nodesNational: nodeCount, waysNational: nw, results, variants: variantsOut });
+writeJson(path.join(outDir, "graph_stats.json"), { snapshot, bufferM: areas.bufferM, restrictions: restrictionCount, bridges, nodesNational: nodeCount, waysNational: nw, results, variants: variantsOut });
 reportResources(path.join(outDir, "graph_build.res.json"), { seconds: Math.round((Date.now() - t0) / 1000) });
 log("gotowe");

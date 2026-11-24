@@ -9,7 +9,8 @@ import { dist, hav, readJson, reportResources, rng, sha256, writeJson } from "./
 import { createAddrIndex, decodeAddr, lookup } from "./addr_format.mjs";
 import { decodeGraph } from "./graph_format.mjs";
 import { keyOf, fold } from "./normalize.mjs";
-import { createSearch, buildSnap, locate, readTarget, seedsFrom, SNAP_MAX_M } from "./router.mjs";
+import { createEdgeSearch } from "./edge_search.mjs";
+import { buildSnap, locate, SNAP_MAX_M } from "./router.mjs";
 
 const [work, prevFile, fixDir, ...opts] = process.argv.slice(2);
 const only = opts.find((o) => o.startsWith("--only="))?.slice(7).split(",");
@@ -20,6 +21,18 @@ const LIMIT_COUNT = 20000;
 const EXPECTED_POWIATS = 380;
 const MIN_POWIAT_RATE = 0.5;
 const MAX_INPUT_AGE_DAYS = 45;
+// Relacji restriction dla aut w Polsce jest ok. 43 tys. (2026-11); polowa tego = obciete wejscie.
+const MIN_RESTRICTIONS = 20000;
+const TURN_SAMPLE = 500;
+const MAX_LOST_SHARE = 0.002;
+// Tryb alarmu stalych par: naturalna zmiennosc m/m jest nieznana, wiec pierwsze trzy wydania formatu 2 tylko ostrzegaja.
+const PAIRS_BLOCK = process.argv.includes("--block-pairs");
+// Promien mniejszy niz odstep sasiednich mostow tej samej rzeki, wiekszy niz odstep dwoch jezdni i przesuniecie srodka po podziale drogi.
+const BRIDGE_NEAR_M = 60;
+const MAX_BRIDGES_LOST = 0.02;
+const MIN_BRIDGES = 1000;
+const PAIR_SOURCES = 5;
+const PAIR_TARGETS = 8;
 const rand = rng(20261107);
 
 const prg = readJson(path.join(work, "prg", "prg_stats.json"));
@@ -415,13 +428,15 @@ const GRAPH_LIST = graphStats.results.filter((r) => r.kind !== "coarse");
 const prevGraph = prev.graphs || {};
 gate("graph-sanity", "puste lub rozsypane miasto, ucieta siec, skok rozmiaru", "brak pojedynczej ulicy, zle kierunki, bledne limity predkosci", () => {
   const bad = [];
+  // Inny bufor = inny wybor drog, wiec liczba wezlow nie mowi nic o ubytku; delta wraca od nastepnego wydania.
+  const sameBuffer = (prev.bufferM ?? 3000) === graphStats.bufferM;
   for (const r of GRAPH_LIST) {
     if (r.nodes < 500 || r.sccMainPct < 80 || !r.portals) bad.push(`${r.area}:nodes=${r.nodes},scc=${r.sccMainPct},portale=${r.portals}`);
     const p = prevGraph[r.area];
-    if (p && (r.nodes / p < 0.9 || r.nodes / p > 1.15)) bad.push(`${r.area}:wezly ${r.nodes} wobec ${p}`);
+    if (p && sameBuffer && (r.nodes / p < 0.9 || r.nodes / p > 1.15)) bad.push(`${r.area}:wezly ${r.nodes} wobec ${p}`);
   }
   const worst = Math.min(...GRAPH_LIST.map((r) => r.sccMainPct));
-  return { ok: !bad.length, info: `obszary ${GRAPH_LIST.length}, najnizszy SCC ${worst}%, zle: ${bad.slice(0, 8).join(" ") || "-"}` };
+  return { ok: !bad.length, info: `obszary ${GRAPH_LIST.length}, najnizszy SCC ${worst}%, bufor ${graphStats.bufferM} m${sameBuffer ? "" : " (zmieniony, delta wezlow pominieta)"}, zle: ${bad.slice(0, 8).join(" ") || "-"}` };
 });
 
 // Punkty kontrolne zasiegu; wspolrzedne reczne, orientacyjne, jak w weryfikacji sekcja D.
@@ -436,10 +451,31 @@ const runtime = new Map();
 function rt(area) {
   if (!runtime.has(area)) {
     const g = decodeGraph(gunzipFile(`graph-${area}.bin.gz`));
-    runtime.set(area, { g, snapper: buildSnap(g, area === "coarse" ? 1000 : 250), search: createSearch(g) });
+    // Mutant dla falsify_graph.mjs: wyszukiwarka, ktora nie widzi zakazow.
+    if (process.env.FALSIFY_IGNORE_BANS) g.hasBan?.fill(0);
+    runtime.set(area, { g, snapper: buildSnap(g, area === "coarse" ? 1000 : 250), search: createEdgeSearch(g) });
     if (runtime.size > 3) runtime.delete(runtime.keys().next().value);
   }
   return runtime.get(area);
+}
+// Pary kontrolne obszaru: adresy PRG w zasiegu pliku, calkowite wspolrzedne 1e-5, bo tak ida do counts.json.
+function pickPairs(r, a) {
+  const pts = [];
+  for (const pw of new Set(r.terc.map((t) => t.slice(0, 4)))) {
+    const ix = loadAddr().get(pw);
+    if (!ix) continue;
+    const { lat, lon, header } = ix.d;
+    for (let k = 0; k < 60; k += 1) {
+      const i = Math.floor(rand() * header.points);
+      if (a.g.covers(lat[i], lon[i])) pts.push([Math.round(lat[i] * 1e5), Math.round(lon[i] * 1e5)]);
+    }
+  }
+  const rows = [];
+  for (let s = 0; s < PAIR_SOURCES && pts.length > PAIR_TARGETS; s += 1) {
+    const from = pts[Math.floor(rand() * pts.length)];
+    for (let t = 0; t < PAIR_TARGETS; t += 1) rows.push([...from, ...pts[Math.floor(rand() * pts.length)], 0]);
+  }
+  return rows;
 }
 gate("coverage-snap", "ciche wyjscie poza plik, przesuniety graf wobec adresow", "punkty w zasiegu z dojazdem przez inna gmine", () => {
   const rows = [];
@@ -512,8 +548,8 @@ gate("graph-route", "rozspojnienie sieci po skroceniu, zly dekoder dlugosci", "d
     for (let k = 0; k + 1 < pts.length && k < 40; k += 2) {
       const sa = a.snapper.snap(pts[k][0], pts[k][1]);
       const sb = a.snapper.snap(pts[k + 1][0], pts[k + 1][1]);
-      a.search.run(seedsFrom(a.g, sa));
-      const res = readTarget(a.g, a.search, sb);
+      a.search.run({ snap: sa });
+      const res = a.search.read(sb);
       pairs += 1;
       if (!res) {
         unreachable += 1;
@@ -526,6 +562,116 @@ gate("graph-route", "rozspojnienie sieci po skroceniu, zly dekoder dlugosci", "d
   const d = dist(ratios, 3);
   detail.graphRoute = { pairs, unreachable, ratio: d };
   return { ok: unreachable === 0 && d.p50 >= 1.1 && d.p50 <= 1.8 && d.p99 < 6 && !bad.length, info: `pary ${pairs}, nieosiagalne ${unreachable}, trasa/linia p50 ${d.p50}, p99 ${d.p99}, max ${d.max}; ${bad.join(" ")}` };
+});
+// Zakazy skretu: liczba w pliku = liczba z budowy (zakaz z krawedzia spoza grafu wypada w dekoderze) i bez spadku m/m.
+gate("turn-count", "zgubione zakazy: brak relacji w wejsciu, zle numery wezlow w pliku, pusty strumien", "pojedynczego zakazu usunietego z OSM", () => {
+  const bad = [];
+  const files = {};
+  for (const r of graphStats.results) {
+    const g = decodeGraph(gunzipFile(r.file));
+    files[r.area] = g.banCount ?? 0;
+    if (!g.bans || g.banCount !== r.bans) bad.push(`${r.area}:${g.banCount ?? "brak"} z ${r.bans}`);
+  }
+  const total = Object.values(files).reduce((a, b) => a + b, 0);
+  const prevTotal = prev.bans && prev.bufferM === graphStats.bufferM ? Object.entries(prev.bans).reduce((a, [k, n]) => a + (k in files ? n : 0), 0) : 0;
+  const compared = prevTotal ? Object.keys(prev.bans).reduce((a, k) => a + (files[k] ?? 0), 0) : 0;
+  const { input, usable } = graphStats.restrictions;
+  const share = usable / input;
+  detail.turnCount = { total, prevTotal, compared, input, usable };
+  return { ok: !bad.length && input >= MIN_RESTRICTIONS && share >= 0.8 && (!prevTotal || compared / prevTotal >= 0.95), info: `zakazy w plikach ${total}, wobec poprzednich ${prevTotal ? (compared / prevTotal).toFixed(3) : "-"}, relacje uzyte ${usable}/${input}, zle pliki: ${bad.slice(0, 6).join(" ") || "-"}` };
+});
+// Metoda Grasera (2014): trasa od srodka drogi wjazdu do srodka drogi wyjazdu musi byc dluzsza niz zakazany manewr o > 10 m.
+// Liczona wyszukiwarka wtyczki na pliku ze stage, wiec lapie tez blad algorytmu. 100%, bo to test kodu, nie danych.
+gate("turn-legal", "zakazany manewr w trasie", "zakazu, ktorego nie ma w OSM", () => {
+  let tested = 0;
+  const bad = [];
+  for (const r of graphStats.results) {
+    const { g, search } = rt(r.area);
+    const list = [...(g.bans || [])].flatMap(([e, outs]) => outs.filter((o) => g.rev[e] !== o).map((o) => [e, o]));
+    const step = Math.max(1, Math.floor(list.length / TURN_SAMPLE));
+    for (let i = 0; i < list.length; i += step) {
+      const [e, o] = list[i];
+      const half = (g.W[e] + g.W[o]) / 2;
+      search.run({ snap: { e, f: 0.5, back: -1 }, limit: half + 30 });
+      const res = search.read({ e: o, f: 0.5, back: -1 });
+      tested += 1;
+      if (res && res[1] <= (g.Ln[e] + g.Ln[o]) / 2 + 10) bad.push(`${r.area}:${e}-${o}`);
+    }
+  }
+  return { ok: tested >= 1000 && !bad.length, info: `manewry ${tested}, zlamane ${bad.length} ${bad.slice(0, 6).join(" ")}` };
+});
+// Zakazy i brak zawracania nie moga odcinac drog, ktore bez nich byly osiagalne.
+gate("turn-reach", "zakazy odcinajace czesc miasta", "gorszej trasy przy zachowanej osiagalnosci", () => {
+  const bad = [];
+  let lost = 0;
+  let all = 0;
+  for (const r of GRAPH_LIST) {
+    const { g, search } = rt(r.area);
+    // Start z wezla o srodkowym numerze: skladowa glowna jest silnie spojna, wiec bez zakazow dochodzi wszedzie.
+    search.run({ nodes: [[g.n >> 1, 0, 0, 0]] });
+    let n = 0;
+    for (let u = 0; u < g.n; u += 1) if (!search.node(u)) n += 1;
+    lost += n;
+    all += g.n;
+    if (n / g.n > MAX_LOST_SHARE) bad.push(`${r.area}:${((100 * n) / g.n).toFixed(2)}%`);
+  }
+  return { ok: !bad.length, info: `wezly nieosiagalne ${lost}/${all} = ${((100 * lost) / all).toFixed(3)}%, ponad prog: ${bad.slice(0, 6).join(" ") || "-"}` };
+});
+// Stale pary adresow z poprzedniego wydania: zmiana km bez zmiany metody to ubytek mostu, wandalizm albo rozspojnienie.
+// Pary przechodza w counts.json, nowy obszar dostaje pary teraz. Pierwsze wydania tylko ostrzegaja (PAIRS_BLOCK).
+gate("fixed-pairs", "utrata mostu lub waznej drogi, masowa zmiana tras", "zmiany malych ulic poza parami", () => {
+  const out = {};
+  const changes = [];
+  const bad = [];
+  const samePairs = prev.pairs && prev.bufferM === graphStats.bufferM;
+  for (const r of GRAPH_LIST) {
+    const a = rt(r.area);
+    const old = samePairs ? prev.pairs[r.area] : null;
+    const coords = old || pickPairs(r, a);
+    const rows = [];
+    const local = [];
+    let last = "";
+    for (const [la, lo, lb, lp, km] of coords) {
+      const sa = a.snapper.snap(la / 1e5, lo / 1e5);
+      const sb = a.snapper.snap(lb / 1e5, lp / 1e5);
+      const key = `${la},${lo}`;
+      if (key !== last) a.search.run({ snap: sa });
+      last = key;
+      const res = a.search.read(sb);
+      const now = res ? Math.round(res[1]) / 1000 : 0;
+      rows.push([la, lo, lb, lp, now]);
+      if (old && km > 0.5) local.push(now ? Math.abs(now / km - 1) : 1);
+    }
+    out[r.area] = rows;
+    if (!local.length) continue;
+    changes.push(...local);
+    const far = local.filter((x) => x > 0.1).length / local.length;
+    if (far > 0.1) bad.push(`${r.area}:${(100 * far).toFixed(0)}% par > 10%`);
+  }
+  writeJson(path.join(work, "pairs.json"), out);
+  const d = dist(changes, 4);
+  const over = d.n > 0 && (d.p99 > 0.05 || bad.length > 0);
+  const info = `pary ${d.n}, zmiana p50 ${d.p50}, p99 ${d.p99}, max ${d.max}; ${bad.slice(0, 6).join(" ") || "-"}`;
+  return { ok: !PAIRS_BLOCK || !over, info: over && !PAIRS_BLOCK ? `ALARM ${info}` : info };
+});
+// Most zgubiony = w poprzednim wydaniu byl, teraz zadnego dlugiego mostu w promieniu BRIDGE_NEAR_M. Pojedynczy bywa prawdziwy
+// (remont, przebudowa), wiec tylko ostrzega miejscem; ubytek ponad MAX_BRIDGES_LOST to zepsute wejscie albo wandalizm.
+gate("bridges", "utrata mostow: ucieta siec, wandalizm", "mostu krotszego niz 80 m i drogi lokalnej", () => {
+  const cell = (la, lo) => `${Math.floor(la / 20)},${Math.floor(lo / 20)}`;
+  const grid = new Map();
+  for (const [la, lo] of graphStats.bridges) {
+    const k = cell(la, lo);
+    grid.set(k, [...(grid.get(k) || []), [la, lo]]);
+  }
+  const lost = (prev.bridges || []).filter(([la, lo]) => {
+    for (let y = -1; y <= 1; y += 1) for (let x = -1; x <= 1; x += 1) {
+      for (const [a, b] of grid.get(cell(la + y * 20, lo + x * 20)) || []) if (hav(la / 1e4, lo / 1e4, a / 1e4, b / 1e4) < BRIDGE_NEAR_M) return false;
+    }
+    return true;
+  });
+  const n = graphStats.bridges.length;
+  const info = `mosty ${n}, poprzednio ${prev.bridges?.length ?? "-"}, zgubione ${lost.length}: ${lost.slice(0, 8).map(([a, b]) => `${a / 1e4},${b / 1e4}`).join(" ") || "-"}`;
+  return { ok: n >= MIN_BRIDGES && lost.length <= MAX_BRIDGES_LOST * (prev.bridges?.length || 0), info: lost.length ? `ALARM ${info}` : info };
 });
 gate("coarse-portals", "rozjazd grafu zgrubnego z grafem miasta, siec krajowa w kawalkach", "gorsza trasa w kraju przy zachowanej spojnosci", () => {
   const rec = graphStats.results.find((r) => r.kind === "coarse");
@@ -555,8 +701,8 @@ gate("coarse-portals", "rozjazd grafu zgrubnego z grafem miasta, siec krajowa w 
     const sb = c.snapper.snap(lb, lp);
     let res = null;
     if (sa && sb) {
-      c.search.run(seedsFrom(c.g, sa));
-      res = readTarget(c.g, c.search, sb);
+      c.search.run({ snap: sa });
+      res = c.search.read(sb);
     }
     rows.push({ name, km: res ? Math.round(res[1] / 1000) : null, expectKm: km });
   }

@@ -34,6 +34,9 @@ const sources = fs.existsSync(sourcesFile) ? readJson(sourcesFile) : {};
 writeJson(path.join(stage, "manifest.json"), {
   format: 1,
   snapshot,
+  // Stawki kar za skret w trasie (edge_search.mjs) pochodza z tego profilu.
+  graphFormat: 2,
+  turnProfile: "OSRM car.lua master 746c97c, bez oncoming_turn_penalty",
   sources,
   licences: { prg: "Państwowy Rejestr Granic, GUGiK, CC BY 4.0", osm: "OpenStreetMap contributors, ODbL 1.0" },
   totals: { files: files.length + 1, bytes: files.reduce((a, f) => a + f.size, 0) },
