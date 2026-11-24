@@ -6,22 +6,24 @@
 import hashlib, json, os, sys, time, urllib.error, urllib.request
 
 GEOFABRIK = 'https://download.geofabrik.de/europe/'
+# Geofabrik bywa przeciazony minutami: 6 prob to ok. 7,5 min czekania, a nie utrata pobranych 2,1 GB przez plik 60 B.
+ATTEMPTS = 6
 UA = {'User-Agent': 'ileZaPokoj-data-pipeline/1.0 (monthly data build)'}
 
 
 def with_retry(fn, url):
-    """Krotkie zapytanie kontrolne (HEAD, `.md5`) z 3 probami: chwilowy blad sieci runnera (np. `Network is
+    """Krotkie zapytanie kontrolne (HEAD, `.md5`) z ATTEMPTS probami: chwilowy blad sieci runnera (np. `Network is
     unreachable`) nie moze przerwac budowy po kilkunastu minutach pobierania. HTTP 4xx/5xx przechodzi od razu."""
-    for attempt in range(1, 4):
+    for attempt in range(1, ATTEMPTS + 1):
         try:
             return fn()
         except urllib.error.HTTPError:
             raise
         except OSError as e:
-            if attempt == 3:
+            if attempt == ATTEMPTS:
                 raise
             print(f'{url}: proba {attempt}: {e}', flush=True)
-            time.sleep(15 * attempt)
+            time.sleep(30 * attempt)
 
 
 def head(url):
