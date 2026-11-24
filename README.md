@@ -80,7 +80,7 @@ Pliki `.gz` serwuj bez `Content-Encoding` - klient rozpakowuje je sam.
 
 ## Budowa lokalna
 
-Wymaga Node 22+, Pythona 3.13, ok. 4,1 GB RAM i 7,7 GB dysku; pełny przebieg trwa ok. 40 min.
+Wymaga Node 22+, Pythona 3.13, ok. 4,1 GB RAM i 7,7 GB dysku; pełny przebieg trwa ok. 40 min, a na runnerze ze wzorcem OSRM ok. 55 min (najdłużej pobieranie).
 
 ```bash
 python -m pip install --target pylib -r pipeline/requirements.txt
