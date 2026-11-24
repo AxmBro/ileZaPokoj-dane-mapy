@@ -33,5 +33,6 @@ git grep -nIP "[\x{2013}\x{2014}\x{2026}\x{201E}\x{201D}]" -- ':!pipeline/normal
 
 - Klucz ulicy (`keyOf` w `pipeline/normalize.mjs`) musi dawać ten sam wynik co odczyt we wtyczce; zmiana = nowa para w `pipeline/fixtures/street_keys.json` i zielona bramka `street-key`.
 - Format plików (`addr_format.mjs`, `graph_format.mjs`, `manifest.mjs`) to kontrakt z wtyczką: zmiana bez zmiany dekodera po stronie wtyczki zepsuje mapę u użytkowników.
-- Nowa bramka w `gates.mjs` ma test w `falsify.mjs` (wejście, które ją oblewa).
-- Pełny przebieg: `workflow_dispatch` na GitHubie (ok. 40 min), nie lokalnie.
+- Wyszukiwanie trasy (`edge_search.mjs`) ma identyczną kopię we wtyczce: zmiana tu = ta sama zmiana tam, inaczej bramki sprawdzają inną trasę niż ta u użytkownika.
+- Nowa bramka w `gates.mjs` ma test w `falsify.mjs` albo, gdy dotyczy grafu, w `falsify_graph.mjs` (wejście, które ją oblewa).
+- Pełny przebieg: `workflow_dispatch` na GitHubie, nie lokalnie. Z gałęzi innej niż `main` to próba bez wydania: raporty i grafy w artefakcie.
