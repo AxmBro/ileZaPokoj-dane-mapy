@@ -9,7 +9,7 @@ import zlib from "node:zlib";
 import { execFileSync, spawn } from "node:child_process";
 import { createAddrIndex, decodeAddr } from "./addr_format.mjs";
 import { decodeGraph } from "./graph_format.mjs";
-import { dist, hav, readJson, rng, writeJson } from "./common.mjs";
+import { dist, hav, readJson, rng } from "./common.mjs";
 import { loadGraphRuntime } from "./router.mjs";
 
 const [stage, areasFile, pbf, tmpArg, out, ...opts] = process.argv.slice(2);
@@ -50,10 +50,11 @@ const bounds = (geo) => {
   }
   return b.map((v) => +v.toFixed(5));
 };
-// Jeden przebieg po pliku kraju dla wszystkich wycinkow.
-const cfg = { directory: tmp, extracts: picked.map((a) => ({ output: `${a.area}.osm.pbf`, bbox: bounds(areas.find((x) => x.slug === a.area).buffer) })) };
-writeJson(path.join(tmp, "extracts.json"), cfg);
-execFileSync("osmium", ["extract", "--overwrite", "-s", "complete_ways", "-c", path.join(tmp, "extracts.json"), pbf], { stdio: "inherit" });
+// Wycinek po wycinku: osmium trzyma na kazdy ok. 3 GB (2 x najwyzszy id wezla / 8), wiec 9 naraz zabija runnera z 16 GB.
+const extract = (a) => {
+  const box = bounds(areas.find((x) => x.slug === a.area).buffer).join(",");
+  execFileSync("osmium", ["extract", "--overwrite", "--no-progress", "-s", "complete_ways", "-b", box, "-o", path.join(tmp, `${a.area}.osm.pbf`), pbf], { stdio: "inherit" });
+};
 
 const docker = (...a) => execFileSync("docker", ["run", "--rm", "-v", `${tmp}:/data`, IMAGE, ...a], { stdio: ["ignore", "ignore", "inherit"] });
 const ask = async (a, b) => {
@@ -76,6 +77,7 @@ const results = [];
 const errAll = [];
 for (const a of picked) {
   const base = `/data/${a.area}.osrm`;
+  extract(a);
   docker("osrm-extract", "-p", "/opt/car.lua", `/data/${a.area}.osm.pbf`);
   docker("osrm-partition", base);
   docker("osrm-customize", base);

@@ -87,7 +87,27 @@ jobs:
           gh release create "dane-$dir" "dane-$dir.tar" "dane-$dir.tar.sha256" counts.json \
             --title "Dane mapy $dir" \
             --notes "Zrodla: $snapshot. Adresy: PRG (GUGiK, CC BY 4.0). Grafy drog: (c) OpenStreetMap contributors, ODbL 1.0."
-      # Wzorzec tras to alarm w podsumowaniu. Po wydaniu, zeby czas, dysk albo blad dockera nie mogly go zatrzymac.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: raporty-${{ github.run_id }}
+          path: |
+            build/run-*/run_status.json
+            build/run-*/gates_report.json
+            build/run-*/logs/
+            build/run-*/graph/graph_stats.json
+            build/run-*/osm/osm_extract_stats.json
+          retention-days: 35
+      - name: Grafy z proby
+        if: github.ref_name != 'main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: grafy-${{ github.run_id }}
+          path: |
+            out/current/graph-*.gz
+            out/current/manifest.json
+          retention-days: 7
+      # Wzorzec tras to alarm w podsumowaniu. Na koncu, zeby brak czasu, dysku albo pamieci nie zabral wydania ani raportow.
       - name: Wzorzec tras (OSRM)
         continue-on-error: true
         timeout-minutes: 60
@@ -99,21 +119,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: raporty-${{ github.run_id }}
-          path: |
-            build/run-*/run_status.json
-            build/run-*/gates_report.json
-            build/run-*/logs/
-            build/run-*/graph/graph_stats.json
-            build/run-*/osm/osm_extract_stats.json
-            osrm_reference.json
+          name: osrm-${{ github.run_id }}
+          path: osrm_reference.json
+          if-no-files-found: ignore
           retention-days: 35
-      - name: Grafy z proby
-        if: github.ref_name != 'main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: grafy-${{ github.run_id }}
-          path: |
-            out/current/graph-*.gz
-            out/current/manifest.json
-          retention-days: 7
