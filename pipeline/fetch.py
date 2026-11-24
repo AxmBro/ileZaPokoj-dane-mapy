@@ -57,9 +57,10 @@ def prg_url():
 
 
 # klucz -> (nazwa w dl, funkcja zwracajaca (url, czy zrodlo ma plik `.md5`))
+# OSM pierwszy: Geofabrik bywa nieosiagalny z runnera, a taki przebieg ma pasc od razu, nie po pobraniu PRG.
 SOURCES = {
-    'prg': ('POLSKA.zip', prg_url),
     'osm': ('poland.osm.pbf', osm_month_url),
+    'prg': ('POLSKA.zip', prg_url),
 }
 
 
