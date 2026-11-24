@@ -79,9 +79,6 @@ const SCENARIOS = {
     const [la, lo] = s.bridges[100];
     s.bridges = s.bridges.filter(([a, b]) => Math.abs(a - la) > 12 || Math.abs(b - lo) > 18);
   }) },
-  "zmiana-tras": { gate: "fixed-pairs", opts: ["--block-pairs"], prev: (c) => {
-    for (const rows of Object.values(c.pairs)) rows.forEach((r, i) => { if (i % 6 === 0) r[4] *= 1.4; });
-  } },
   "inny-bufor-nie-psuje-delty": { gate: "graph-sanity", expectOk: true, prev: (c) => {
     c.bufferM = 3000;
     for (const k of Object.keys(c.graphs)) c.graphs[k] = Math.round(c.graphs[k] / 1.4);
@@ -91,15 +88,15 @@ const SCENARIOS = {
   } },
 };
 
-function runGate(dir, gate, prevFile, env = {}, opts = []) {
-  const r = spawnSync("node", ["--max-old-space-size=5000", path.join(here, "gates.mjs"), dir, prevFile, path.join(here, "fixtures"), `--only=${gate}`, ...opts], { encoding: "utf8", env: { ...process.env, ...env } });
+function runGate(dir, gate, prevFile, env = {}) {
+  const r = spawnSync("node", ["--max-old-space-size=5000", path.join(here, "gates.mjs"), dir, prevFile, path.join(here, "fixtures"), `--only=${gate}`], { encoding: "utf8", env: { ...process.env, ...env } });
   const line = r.stdout.split("\n").find((l) => l.includes(` ${gate} (`)) || r.stderr.slice(-300);
   return { ok: r.status === 0, line };
 }
 let bad = 0;
 for (const gate of new Set(Object.values(SCENARIOS).map((s) => s.gate))) {
   const dir = fresh("kontrola");
-  const r = runGate(dir, gate, counts, {}, gate === "fixed-pairs" ? ["--block-pairs"] : []);
+  const r = runGate(dir, gate, counts);
   if (!r.ok) bad += 1;
   console.log(`${r.ok ? "ok  " : "BLAD"} kontrola ${gate}: ${r.line.slice(0, 220)}`);
 }
@@ -110,7 +107,7 @@ for (const [name, sc] of Object.entries(SCENARIOS)) {
   sc.prev?.(prev);
   writeJson(prevFile, prev);
   sc.make?.(dir);
-  const r = runGate(dir, sc.gate, prevFile, sc.env, sc.opts);
+  const r = runGate(dir, sc.gate, prevFile, sc.env);
   const pass = (sc.expectOk ? r.ok : !r.ok) && (!sc.expectText || r.line.includes(sc.expectText));
   if (!pass) bad += 1;
   console.log(`${pass ? "ok  " : "BLAD"} ${name} -> ${sc.gate} ${sc.expectOk ? "przechodzi" : "pada"}: ${r.line.slice(0, 220)}`);

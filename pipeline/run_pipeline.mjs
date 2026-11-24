@@ -104,7 +104,7 @@ if (!arg("no-deploy")) {
   const prg = JSON.parse(fs.readFileSync(path.join(dPrg, "prg_stats.json"), "utf8"));
   const graph = JSON.parse(fs.readFileSync(path.join(dGraph, "graph_stats.json"), "utf8"));
   const counts = { perPowiat: prg.perPowiat, perGmina: prg.perGmina, graphs: Object.fromEntries(graph.results.map((r) => [r.area, r.nodes])),
-    bans: Object.fromEntries(graph.results.map((r) => [r.area, r.bans])), bufferM: graph.bufferM, bridges: graph.bridges, pairs: JSON.parse(fs.readFileSync(path.join(work, "pairs.json"), "utf8")) };
+    bans: Object.fromEntries(graph.results.map((r) => [r.area, r.bans])), bufferM: graph.bufferM, bridges: graph.bridges };
   const next = path.join(publish, "next");
   fs.rmSync(next, { recursive: true, force: true });
   fs.cpSync(path.join(work, "stage"), next, { recursive: true });

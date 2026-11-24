@@ -12,7 +12,7 @@ Każde wydanie to [GitHub Release](../../releases) `dane-RRRRMMDD-GGMMSS` z trze
 |---|---|
 | `dane-RRRRMMDD-GGMMSS.tar` | katalog `RRRRMMDD-GGMMSS/` z plikami danych (niżej) |
 | `dane-RRRRMMDD-GGMMSS.tar.sha256` | suma SHA-256 archiwum |
-| `counts.json` | liczniki punktów, węzłów i zakazów, pary kontrolne tras i lista mostów - odniesienie bramek następnego wydania |
+| `counts.json` | liczniki punktów, węzłów i zakazów oraz lista mostów - odniesienie bramek następnego wydania |
 
 Zawartość katalogu:
 
@@ -52,7 +52,7 @@ Pliki `.gz` serwuj bez `Content-Encoding` - klient rozpakowuje je sam.
 
 1. Workflow [`dane-mapy.yml`](.github/workflows/dane-mapy.yml) rusza 8. dnia miesiąca, zapasowo 11. (tylko gdy wydania z tego miesiąca jeszcze nie ma), albo ręcznie.
 2. [`fetch.py`](pipeline/fetch.py) pobiera `POLSKA.zip` z PRG i miesięczny plik `poland-RRMM01.osm.pbf` z Geofabrik ze sprawdzeniem md5.
-3. [`run_pipeline.mjs`](pipeline/run_pipeline.mjs) buduje adresy i grafy, liczy manifest i uruchamia bramki jakości ([`gates.mjs`](pipeline/gates.mjs)): kompletność powiatów, zmiana liczby punktów względem poprzedniego wydania, znane adresy, zgodność klucza ulicy z wtyczką, trasy kontrolne, zakazy skrętu i osiągalność, mosty, zmiana tras między wydaniami, rozmiary plików, rozdział licencji.
+3. [`run_pipeline.mjs`](pipeline/run_pipeline.mjs) buduje adresy i grafy, liczy manifest i uruchamia bramki jakości ([`gates.mjs`](pipeline/gates.mjs)): kompletność powiatów, zmiana liczby punktów względem poprzedniego wydania, znane adresy, zgodność klucza ulicy z wtyczką, trasy kontrolne, zakazy skrętu i osiągalność, mosty, rozmiary plików, rozdział licencji.
 4. [`osrm_reference.mjs`](pipeline/osrm_reference.mjs) porównuje trasy z lokalnym OSRM w obszarach wylosowanych na ten miesiąc z całego kraju. Wynik jest w podsumowaniu przebiegu jako ostrzeżenie, nie blokuje wydania.
 5. Wydanie powstaje tylko z gałęzi `main` i przy wszystkich zielonych bramkach. Czerwona bramka nie publikuje nic, a użytkownicy zostają na poprzednich danych.
 

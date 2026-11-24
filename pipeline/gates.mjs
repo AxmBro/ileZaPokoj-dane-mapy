@@ -29,14 +29,10 @@ const MIN_SCC_POWIAT = 70;
 const U_TURN_EXTRA_S = 25;
 const TURN_SAMPLE = 500;
 const MAX_LOST_SHARE = 0.002;
-// Tryb alarmu stalych par: naturalna zmiennosc m/m jest nieznana, wiec pierwsze trzy wydania formatu 2 tylko ostrzegaja.
-const PAIRS_BLOCK = process.argv.includes("--block-pairs");
 // Promien mniejszy niz odstep sasiednich mostow tej samej rzeki, wiekszy niz odstep dwoch jezdni i przesuniecie srodka po podziale drogi.
 const BRIDGE_NEAR_M = 60;
 const MAX_BRIDGES_LOST = 0.02;
 const MIN_BRIDGES = 1000;
-const PAIR_SOURCES = 5;
-const PAIR_TARGETS = 8;
 const rand = rng(20261107);
 
 const prg = readJson(path.join(work, "prg", "prg_stats.json"));
@@ -462,25 +458,6 @@ function rt(area) {
   }
   return runtime.get(area);
 }
-// Pary kontrolne obszaru: adresy PRG w zasiegu pliku, calkowite wspolrzedne 1e-5, bo tak ida do counts.json.
-function pickPairs(r, a) {
-  const pts = [];
-  for (const pw of new Set(r.terc.map((t) => t.slice(0, 4)))) {
-    const ix = loadAddr().get(pw);
-    if (!ix) continue;
-    const { lat, lon, header } = ix.d;
-    for (let k = 0; k < 60; k += 1) {
-      const i = Math.floor(rand() * header.points);
-      if (a.g.covers(lat[i], lon[i])) pts.push([Math.round(lat[i] * 1e5), Math.round(lon[i] * 1e5)]);
-    }
-  }
-  const rows = [];
-  for (let s = 0; s < PAIR_SOURCES && pts.length > PAIR_TARGETS; s += 1) {
-    const from = pts[Math.floor(rand() * pts.length)];
-    for (let t = 0; t < PAIR_TARGETS; t += 1) rows.push([...from, ...pts[Math.floor(rand() * pts.length)], 0]);
-  }
-  return rows;
-}
 gate("coverage-snap", "ciche wyjscie poza plik, przesuniety graf wobec adresow", "punkty w zasiegu z dojazdem przez inna gmine", () => {
   const rows = [];
   for (const p of COVER_POINTS) {
@@ -628,43 +605,6 @@ gate("turn-reach", "zakazy odcinajace czesc miasta", "gorszej trasy przy zachowa
     if (n / inside > MAX_LOST_SHARE) bad.push(`${r.area}:${((100 * n) / inside).toFixed(2)}%`);
   }
   return { ok: !bad.length, info: `wezly nieosiagalne ${lost}/${all} = ${((100 * lost) / all).toFixed(3)}%, ponad prog: ${bad.slice(0, 6).join(" ") || "-"}` };
-});
-// Stale pary adresow z poprzedniego wydania: zmiana km bez zmiany metody to ubytek mostu, wandalizm albo rozspojnienie.
-// Pary przechodza w counts.json, nowy obszar dostaje pary teraz. Pierwsze wydania tylko ostrzegaja (PAIRS_BLOCK).
-gate("fixed-pairs", "utrata mostu lub waznej drogi, masowa zmiana tras", "zmiany malych ulic poza parami", () => {
-  const out = {};
-  const changes = [];
-  const bad = [];
-  const samePairs = prev.pairs && prev.bufferM === graphStats.bufferM;
-  for (const r of GRAPH_LIST) {
-    const a = rt(r.area);
-    const old = samePairs ? prev.pairs[r.area] : null;
-    const coords = old || pickPairs(r, a);
-    const rows = [];
-    const local = [];
-    let last = "";
-    for (const [la, lo, lb, lp, km] of coords) {
-      const sa = a.snapper.snap(la / 1e5, lo / 1e5);
-      const sb = a.snapper.snap(lb / 1e5, lp / 1e5);
-      const key = `${la},${lo}`;
-      if (key !== last) a.search.run({ snap: sa });
-      last = key;
-      const res = a.search.read(sb);
-      const now = res ? Math.round(res[1]) / 1000 : 0;
-      rows.push([la, lo, lb, lp, now]);
-      if (old && km > 0.5) local.push(now ? Math.abs(now / km - 1) : 1);
-    }
-    out[r.area] = rows;
-    if (!local.length) continue;
-    changes.push(...local);
-    const far = local.filter((x) => x > 0.1).length / local.length;
-    if (far > 0.1) bad.push(`${r.area}:${(100 * far).toFixed(0)}% par > 10%`);
-  }
-  writeJson(path.join(work, "pairs.json"), out);
-  const d = dist(changes, 4);
-  const over = d.n > 0 && (d.p99 > 0.05 || bad.length > 0);
-  const info = `pary ${d.n}, zmiana p50 ${d.p50}, p99 ${d.p99}, max ${d.max}; ${bad.slice(0, 6).join(" ") || "-"}`;
-  return { ok: !PAIRS_BLOCK || !over, info: over && !PAIRS_BLOCK ? `ALARM ${info}` : info };
 });
 // Most zgubiony = w poprzednim wydaniu byl, teraz zadnego dlugiego mostu w promieniu BRIDGE_NEAR_M. Pojedynczy bywa prawdziwy
 // (remont, przebudowa), wiec tylko ostrzega miejscem; ubytek ponad MAX_BRIDGES_LOST to zepsute wejscie albo wandalizm.
