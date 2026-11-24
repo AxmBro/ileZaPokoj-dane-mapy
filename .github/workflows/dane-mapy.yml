@@ -38,8 +38,8 @@ jobs:
     needs: check
     if: needs.check.outputs.skip != '1'
     runs-on: ubuntu-latest
-    # Pelny przebieg ok. 40 min, szczyt ok. 4,1 GB RAM i 7,7 GB dysku (pomiar lokalny 2026-11-07).
-    timeout-minutes: 150
+    # Grafy wszystkich powiatow i ich bramki; czas przebiegu 2026-11-24 w README.
+    timeout-minutes: 240
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -73,14 +73,6 @@ jobs:
       - name: Falsyfikacja bramek grafu
         if: github.ref_name != 'main'
         run: node pipeline/falsify_graph.mjs build/run-* out/current/counts.json falsify-tmp
-      # Wzorzec tras to alarm w podsumowaniu, nie warunek wydania: blad dockera albo OSRM nie moze zatrzymac danych.
-      - name: Wzorzec tras (OSRM)
-        continue-on-error: true
-        timeout-minutes: 60
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
-          work=$(ls -d build/run-*)
-          node pipeline/osrm_reference.mjs out/current "$work/osm/areas.json" dl/poland.osm.pbf osrm-tmp osrm_reference.json | tee -a "$GITHUB_STEP_SUMMARY"
       # Wydanie tylko z main: przebieg reczny z innej galezi to proba (raporty i grafy w artefakcie), serwer jej nie zobaczy.
       - name: Wydanie
         if: github.ref_name == 'main'
@@ -95,6 +87,15 @@ jobs:
           gh release create "dane-$dir" "dane-$dir.tar" "dane-$dir.tar.sha256" counts.json \
             --title "Dane mapy $dir" \
             --notes "Zrodla: $snapshot. Adresy: PRG (GUGiK, CC BY 4.0). Grafy drog: (c) OpenStreetMap contributors, ODbL 1.0."
+      # Wzorzec tras to alarm w podsumowaniu. Po wydaniu, zeby czas, dysk albo blad dockera nie mogly go zatrzymac.
+      - name: Wzorzec tras (OSRM)
+        continue-on-error: true
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
+          work=$(ls -d build/run-*)
+          node pipeline/osrm_reference.mjs out/current "$work/osm/areas.json" dl/poland.osm.pbf osrm-tmp osrm_reference.json | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

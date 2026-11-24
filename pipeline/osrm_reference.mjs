@@ -14,7 +14,7 @@ import { loadGraphRuntime } from "./router.mjs";
 
 const [stage, areasFile, pbf, tmpArg, out, ...opts] = process.argv.slice(2);
 const opt = (k, d) => opts.find((o) => o.startsWith(`--${k}=`))?.slice(k.length + 3) ?? d;
-const IMAGE = "ghcr.io/project-osrm/osrm-backend:v26.11.0";
+const IMAGE = "ghcr.io/project-osrm/osrm-backend:v26.11.0-debian";
 const PORT = 5000;
 const SOURCES = 30;
 const TARGETS = 10;
