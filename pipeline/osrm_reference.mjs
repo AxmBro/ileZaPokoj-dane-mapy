@@ -110,8 +110,9 @@ for (const a of picked) {
     const err = rows.map((r) => (100 * Math.abs(r.km - r.osrmKm)) / r.osrmKm);
     const min = rows.map((r) => (100 * (r.min - r.osrmMin)) / r.osrmMin);
     errAll.push(...err);
-    const worst = rows.map((r, i) => ({ ...r, err: +err[i].toFixed(1) })).sort((x, y) => y.err - x.err).slice(0, 5);
-    const rec = { area: a.area, kind: a.kind, km: dist(err, 2), minSigned: dist(min, 2), over5: +((100 * err.filter((e) => e > 5).length) / err.length).toFixed(1), worst };
+    // Wszystkie pary w raporcie: kolejny wariant algorytmu liczy sie na nich bez nowego przebiegu OSRM.
+    const pairs = rows.map((r) => [...r.from, ...r.to, +r.km.toFixed(3), +r.min.toFixed(2), +r.osrmKm.toFixed(3), +r.osrmMin.toFixed(2)]);
+    const rec = { area: a.area, kind: a.kind, km: dist(err, 2), minSigned: dist(min, 2), over5: +((100 * err.filter((e) => e > 5).length) / err.length).toFixed(1), pairs };
     results.push(rec);
     console.log(`${a.area} (${a.kind}): pary ${rec.km.n}, km p50 ${rec.km.p50}% p90 ${rec.km.p90}% max ${rec.km.max}%, ponad 5%: ${rec.over5}%, czas p50 ${rec.minSigned.p50}%`);
   } finally {
@@ -126,6 +127,6 @@ for (const a of picked) {
 }
 const all = dist(errAll, 2);
 const alarm = all.p50 > MAX_P50 || all.p90 > MAX_P90;
-writeJson(out, { image: IMAGE, month, all, alarm, results });
+fs.writeFileSync(out, JSON.stringify({ image: IMAGE, month, all, alarm, results }));
 console.log(`${alarm ? "ALARM" : "OK"} wzorzec OSRM: pary ${all.n}, km p50 ${all.p50}% (prog ${MAX_P50}), p90 ${all.p90}% (prog ${MAX_P90}), p99 ${all.p99}%, max ${all.max}%`);
 if (alarm && process.env.GITHUB_ACTIONS) console.log(`::warning title=Wzorzec tras::km p50 ${all.p50}%, p90 ${all.p90}%`);
