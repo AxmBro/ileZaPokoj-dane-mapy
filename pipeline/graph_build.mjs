@@ -20,6 +20,9 @@ const COARSE_TERTIARY_MAX_CLASS = 9;
 const SIGNAL_S = 2;
 const NO_SNAP_MAX_CLASS = 1; // motorway, motorway_link: dom nie ma z nich wjazdu
 const ISLAND_MIN_NODES = 1000; // mniejszy odciety kawalek to wjazd albo plac, nie drugi brzeg rzeki
+// Skracanie drogi do cieciwy nie moze odsunac jej od przebiegu dalej niz tyle: do cieciwy przyciaga sie punkt i z niej jest kat skretu.
+// 2654 pary wobec OSRM: p90 km 2,9 -> 2,1%, ponad 5% 5,8 -> 4,2% par; 10 m nie daje wiecej na osobnych 80 parach, pliki rosna.
+const CHORD_M = 20;
 const BUFFER_RASTER = 0.002; // stopnie, ok. 140-220 m; rozdzielczosc wyboru drog do obszaru
 
 // 1. Wczytanie drog do tablic typowanych. Rekord: <d way id><B klasa><B flagi><f predkosc w przod><f w tyl><I n><d id * n><i lon, lat * n>.
@@ -413,6 +416,8 @@ function buildGraph(wayList, keepMask) {
     if (many || b < 0) continue;
     if (hasIn(inn, n, a) === hasIn(out, n, b) && hasIn(inn, n, b) === hasIn(out, n, a)) removable[n] = 1;
   }
+  // Graf zgrubny (bez maski) prowadzi tylko dalekie trasy, a kazdy jego wezel jest portalem w plikach obszarow.
+  if (keepMask) keepBends(N0, comp, main, removable, out, toGlobal);
   const isSignal = (n) => nodeFlag[toGlobal[n]] & 2;
   let eCap = D2 + 16;
   let eU = new Int32Array(eCap);
@@ -543,6 +548,55 @@ function buildGraph(wayList, keepMask) {
   };
 }
 
+// Wezly zakretow (Douglas-Peucker na kazdym lancuchu wezlow do usuniecia) zostaja w grafie.
+function keepBends(N0, comp, main, removable, out, toGlobal) {
+  const x = (n) => (nodeLon[toGlobal[n]] / 1e7) * 111195 * Math.cos((nodeLat[toGlobal[n]] / 1e7) * (Math.PI / 180));
+  const y = (n) => (nodeLat[toGlobal[n]] / 1e7) * 111195;
+  const keep = [];
+  for (let n = 0; n < N0; n += 1) {
+    if (comp[n] !== main || removable[n]) continue;
+    for (let e = out.off[n]; e < out.off[n + 1]; e += 1) {
+      const chain = [n];
+      let prev = n;
+      let cur = out.to[e];
+      while (removable[cur] && chain.length < 100000) {
+        chain.push(cur);
+        let next = -1;
+        for (let q = out.off[cur]; q < out.off[cur + 1]; q += 1) if (out.to[q] !== prev) next = out.to[q];
+        if (next < 0) break;
+        prev = cur;
+        cur = next;
+      }
+      if (chain.length < 2) continue;
+      chain.push(cur);
+      const stack = [[0, chain.length - 1]];
+      while (stack.length) {
+        const [a, b] = stack.pop();
+        const ax = x(chain[a]);
+        const ay = y(chain[a]);
+        const dx = x(chain[b]) - ax;
+        const dy = y(chain[b]) - ay;
+        const len2 = dx * dx + dy * dy;
+        let far = 0;
+        let at = -1;
+        for (let i = a + 1; i < b; i += 1) {
+          const px = x(chain[i]) - ax;
+          const py = y(chain[i]) - ay;
+          const t = len2 ? Math.max(0, Math.min(1, (px * dx + py * dy) / len2)) : 0;
+          const d = Math.hypot(px - t * dx, py - t * dy);
+          if (d > far) {
+            far = d;
+            at = i;
+          }
+        }
+        if (far <= CHORD_M) continue;
+        keep.push(chain[at]);
+        stack.push([a, at], [at, b]);
+      }
+    }
+  }
+  for (const n of keep) removable[n] = 0;
+}
 // Rasteryzacja (Multi)Polygonu GeoJSON na siatke: linia skanu po srodkach wierszy, regula parzystosci.
 function rasterize(geo, lat0, lon0, dLat, dLon, nx, ny) {
   const bits = new Uint8Array(nx * ny);
