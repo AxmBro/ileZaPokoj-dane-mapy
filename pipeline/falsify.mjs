@@ -95,8 +95,8 @@ function lostWays(maxClass, every, minClass = 0) {
     let total = 0;
     // Usuwa co n-ta droge z zakresu klas (indeksy CLASSES z osm_extract.py), bez zmiany reszty wejscia.
     for (let p = 0, i = 0; p < raw.length; i += 1) {
-      const k = raw.readUInt32LE(p + 14);
-      const len = 18 + k * 16;
+      const k = raw.readUInt32LE(p + 18);
+      const len = 22 + k * 16;
       total += 1;
       if (raw[p + 8] <= maxClass && raw[p + 8] >= minClass && i % every === 0) cut += 1;
       else parts.push(raw.subarray(p, p + len));

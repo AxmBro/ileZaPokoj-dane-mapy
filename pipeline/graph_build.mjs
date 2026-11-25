@@ -21,15 +21,15 @@ const SIGNAL_S = 2;
 const NO_SNAP_MAX_CLASS = 1; // motorway, motorway_link: dom nie ma z nich wjazdu
 const BUFFER_RASTER = 0.002; // stopnie, ok. 140-220 m; rozdzielczosc wyboru drog do obszaru
 
-// 1. Wczytanie drog do tablic typowanych. Rekord: <d way id><B klasa><B flagi><f predkosc><I n><d id * n><i lon, lat * n>.
+// 1. Wczytanie drog do tablic typowanych. Rekord: <d way id><B klasa><B flagi><f predkosc w przod><f w tyl><I n><d id * n><i lon, lat * n>.
 const raw = fs.readFileSync(path.join(osmDir, "ways.bin"));
 let nw = 0;
 let refs = 0;
 for (let p = 0; p < raw.length; ) {
-  const k = raw.readUInt32LE(p + 14);
+  const k = raw.readUInt32LE(p + 18);
   nw += 1;
   refs += k;
-  p += 18 + k * 16;
+  p += 22 + k * 16;
 }
 if (nw === 0) {
   console.log("GATE:osm-input ways.bin pusty");
@@ -38,6 +38,7 @@ if (nw === 0) {
 const wayClass = new Uint8Array(nw);
 const wayFlags = new Uint8Array(nw);
 const waySpeed = new Float32Array(nw);
+const waySpeedBack = new Float32Array(nw);
 const wayStart = new Uint32Array(nw + 1);
 const wayIdx = new Map();
 const refId = new Float64Array(refs);
@@ -51,9 +52,10 @@ const refLat = new Int32Array(refs);
     wayClass[w] = raw[p + 8];
     wayFlags[w] = raw[p + 9];
     waySpeed[w] = raw.readFloatLE(p + 10);
-    const k = raw.readUInt32LE(p + 14);
+    waySpeedBack[w] = raw.readFloatLE(p + 14);
+    const k = raw.readUInt32LE(p + 18);
     wayStart[w] = r;
-    p += 18;
+    p += 22;
     for (let i = 0; i < k; i += 1) refId[r + i] = raw.readDoubleLE(p + i * 8);
     p += k * 8;
     for (let i = 0; i < k; i += 1) {
@@ -230,6 +232,7 @@ function buildGraph(wayList, keepMask) {
   const segL = new Float32Array(refSum);
   const segT = new Float32Array(refSum);
   const segW = new Float32Array(refSum);
+  const segBack = new Float32Array(refSum); // ile razy wolniej w tyl niz w przod
   const segFlag = new Uint8Array(refSum);
   const segWay = new Int32Array(refSum);
   let S = 0;
@@ -248,6 +251,7 @@ function buildGraph(wayList, keepMask) {
     const bw = wayFlags[w] & 2;
     const pen = wayFlags[w] & 4 ? 0.5 : 1;
     const ms = (waySpeed[w] * 1000) / 3600;
+    const back = waySpeed[w] / waySpeedBack[w];
     let prevG = refNode[wayStart[w]];
     let prev = local(prevG);
     for (let r = wayStart[w] + 1; r < wayStart[w + 1]; r += 1) {
@@ -272,6 +276,7 @@ function buildGraph(wayList, keepMask) {
       segL[S] = L;
       segT[S] = tt;
       segW[S] = tt / pen;
+      segBack[S] = back;
       segFlag[S] = (fw ? 1 : 0) | (bw ? 2 : 0);
       segWay[S] = w;
       S += 1;
@@ -423,8 +428,9 @@ function buildGraph(wayList, keepMask) {
       let cur = out.to[e];
       let s = out.ref[e];
       let l = segL[s];
-      let w = segW[s];
-      let t = segT[s];
+      const factor = (x, from) => (segU[x] === from ? 1 : segBack[x]);
+      let w = segW[s] * factor(s, n);
+      let t = segT[s] * factor(s, n);
       const firstWay = segWay[s];
       let noSnap = wayClass[firstWay] <= NO_SNAP_MAX_CLASS;
       if (isSignal(cur)) {
@@ -438,8 +444,8 @@ function buildGraph(wayList, keepMask) {
         if (nextE < 0) break;
         s = out.ref[nextE];
         l += segL[s];
-        w += segW[s];
-        t += segT[s];
+        w += segW[s] * factor(s, cur);
+        t += segT[s] * factor(s, cur);
         if (wayClass[segWay[s]] <= NO_SNAP_MAX_CLASS) noSnap = true;
         prev = cur;
         cur = out.to[nextE];

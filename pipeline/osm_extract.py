@@ -35,10 +35,19 @@ CLASS_ID = {c: i for i, c in enumerate(CLASSES)}
 CAR_SPEED = {'motorway': 90, 'motorway_link': 45, 'trunk': 85, 'trunk_link': 40, 'primary': 65, 'primary_link': 30,
              'secondary': 55, 'secondary_link': 25, 'tertiary': 40, 'tertiary_link': 20, 'unclassified': 25,
              'residential': 25, 'living_street': 10, 'service': 15}
-NO_ACCESS = {'no', 'private', 'agricultural', 'forestry', 'emergency', 'psv', 'delivery', 'customers', 'military', 'permit'}
+NO_ACCESS = {'no', 'private', 'agricultural', 'forestry', 'emergency', 'psv', 'delivery', 'customers', 'military', 'permit',
+             'residents', 'bus', 'minibus', 'taxi', 'official', 'restricted', 'foot', 'emergency_vehicle'}
 YES_ACCESS = {'yes', 'permissive', 'designated', 'destination', 'public'}
 SPEED_MAP = {'PL:urban': 50, 'PL:rural': 90, 'PL:living_street': 20, 'PL:motorway': 140, 'PL:expressway': 120, 'PL:zone30': 30, 'PL:zone:30': 30}
+# Najwyzsza predkosc na nawierzchni, jak w car.lua (commit 746c97c); brak wpisu = bez ograniczenia.
+SURFACE_SPEED = {'cement': 80, 'compacted': 80, 'fine_gravel': 80, 'paving_stones': 60, 'metal': 60, 'bricks': 60, 'grass': 40, 'wood': 40,
+                 'sett': 40, 'grass_paver': 40, 'gravel': 40, 'unpaved': 40, 'ground': 40, 'dirt': 40, 'pebblestone': 40, 'tartan': 40,
+                 'cobblestone': 30, 'clay': 30, 'earth': 20, 'stone': 20, 'rocky': 20, 'sand': 20, 'laterite': 15, 'mud': 10}
+TRACKTYPE_SPEED = {'grade1': 60, 'grade2': 40, 'grade3': 30, 'grade4': 25, 'grade5': 20}
+SMOOTHNESS_SPEED = {'intermediate': 80, 'bad': 40, 'very_bad': 20, 'horrible': 10, 'very_horrible': 5}
+NARROW_M = 3
 BARRIER_PASS = {'cattle_grid', 'border_control', 'toll_booth', 'sally_port', 'gate', 'lift_gate', 'no', 'entrance', 'height_restrictor', 'arch'}
+NODE_BLOCK_ACCESS = NO_ACCESS - {'private', 'delivery', 'customers', 'permit', 'residents'}
 SERVICE_MINOR = {'driveway', 'parking_aisle', 'alley', 'parking'}
 # Reguly relacji restriction jak w restriction_parser.cpp OSRM (commit 746c97c): no_* i only_*, bez *_on_red, wyjatek
 # dla auta pomija relacje, wiele from tylko w no_entry, wiele to tylko w no_exit. Zakazy warunkowe i via-way sa pominiete.
@@ -59,6 +68,20 @@ def car_access(t):
     return True
 
 
+def node_blocks(t, hw, ba):
+    """Bariera nie do przejechania: jawny zakaz na wezle albo rodzaj spoza listy; kraweznik na przejsciu i slupek chowany przepuszczaja."""
+    access = next((t[k] for k in ('motorcar', 'motor_vehicle', 'vehicle', 'access') if k in t), None)
+    if not ba or access in YES_ACCESS:
+        return False
+    if access in NODE_BLOCK_ACCESS:
+        return True
+    if ba in BARRIER_PASS:
+        return False
+    if ba == 'kerb' and (hw == 'crossing' or t.get('kerb') in ('lowered', 'flush')):
+        return False
+    return t.get('bollard') != 'rising'
+
+
 def parse_speed(v):
     if not v:
         return 0
@@ -69,12 +92,12 @@ def parse_speed(v):
 
 
 def edge_props(t, hw):
-    """Zwraca (fw, bw, predkosc km/h, pen, svcMinor) albo None, gdy droga nie jest dla aut."""
+    """Zwraca (fw, bw, km/h w przod, km/h w tyl, pen, svcMinor) albo None, gdy droga nie jest dla aut."""
     base = CAR_SPEED.get(hw)
     if not base or t.get('area') == 'yes' or not car_access(t):
         return None
     ow = t.get('oneway')
-    if ow in ('reversible', 'alternating'):
+    if ow == 'reversible':
         return None
     junction = t.get('junction')
     fw = bw = True
@@ -86,11 +109,24 @@ def edge_props(t, hw):
         pass
     elif junction in ('roundabout', 'circular') or hw == 'motorway':
         bw = False
-    ms = parse_speed(t.get('maxspeed'))
-    spd = ms * 0.8 if ms > 0 else base
+    caps = [m[t[k]] for k, m in (('surface', SURFACE_SPEED), ('tracktype', TRACKTYPE_SPEED), ('smoothness', SMOOTHNESS_SPEED)) if t.get(k) in m]
     svc = t.get('service')
-    pen = 0.5 if hw == 'service' and svc else 1
-    return fw, bw, spd, pen, bool(hw == 'service' and svc in SERVICE_MINOR)
+    # Ruch wahadlowy i jeden pas na dwa kierunki: przejazd mozliwy, ale jako droga gorsza (car.lua: 0,4 i 0,5).
+    narrow = ow == 'alternating' or (fw and bw and (leading_number(t.get('lanes')) <= 1 or leading_number(t.get('width')) <= NARROW_M))
+    pen = 0.5 if (hw == 'service' and svc) or narrow else 1
+    return fw, bw, min([way_speed(t, 'forward', base), *caps]), min([way_speed(t, 'backward', base), *caps]), pen, bool(hw == 'service' and svc in SERVICE_MINOR)
+
+
+def way_speed(t, direction, base):
+    """Limit kierunku wygrywa z ogolnym. Bez domyslu z source:maxspeed i maxspeed:type (car.lua go ma): w Krakowie psul czas
+    (|p90| 1,9 -> 5,0%), a km na 2654 parach nie poprawial."""
+    ms = parse_speed(t.get(f'maxspeed:{direction}') or t.get('maxspeed'))
+    return ms * 0.8 if ms > 0 else base
+
+
+def leading_number(v):
+    m = re.match(r'^\d+(\.\d+)?', v or '')
+    return float(m[0]) if m and float(m[0]) > 0 else math.inf
 
 
 def parse_restriction(o, st):
@@ -155,7 +191,7 @@ nout = open(os.path.join(outdir, 'node_flags.bin'), 'wb')
 aout = open(os.path.join(outdir, 'osm_addr_sample.ndjson'), 'w', encoding='utf8')
 stats = {'ways': 0, 'wayRefs': 0, 'waysSkippedBadLoc': 0, 'nodesFlagged': 0, 'addrSeen': 0, 'addrSample': 0, 'classCount': {c: 0 for c in CLASSES}}
 idx_path = os.path.join(outdir, '_nodes.idx')
-HDR = struct.Struct('<dBBfI')  # way id, klasa, flagi (1 fw, 2 bw, 4 kara service, 8 service drobny, 16 most), predkosc, liczba wezlow
+HDR = struct.Struct('<dBBffI')  # way id, klasa, flagi (1 fw, 2 bw, 4 droga gorsza, 8 service drobny, 16 most), predkosc w przod i w tyl, liczba wezlow
 
 
 def sample_addr(kind, oid, lon, lat, t):
@@ -188,7 +224,7 @@ for o in fp:
         fl = 0
         if hw == 'traffic_signals':
             fl |= 2
-        if ba and ba not in BARRIER_PASS and t.get('access') not in ('yes', 'permissive') and t.get('motor_vehicle') != 'yes':
+        if node_blocks(t, hw, ba):
             fl |= 1
         if fl:
             nout.write(struct.pack('<dB', o.id, fl))
@@ -219,9 +255,9 @@ for o in fp:
             k = len(ids)
             sample_addr('w', oid, sum(coords[0::2]) / k / 1e7, sum(coords[1::2]) / k / 1e7, t)
         if p is not None and len(ids) >= 2:
-            fw, bw, spd, pen, minor = p
+            fw, bw, spd, spd_back, pen, minor = p
             flags = (1 if fw else 0) | (2 if bw else 0) | (4 if pen != 1 else 0) | (8 if minor else 0) | (16 if t.get('bridge', 'no') != 'no' else 0)
-            wout.write(HDR.pack(oid, CLASS_ID[hw], flags, spd, len(ids)))
+            wout.write(HDR.pack(oid, CLASS_ID[hw], flags, spd, spd_back, len(ids)))
             wout.write(ids.tobytes())
             wout.write(coords.tobytes())
             stats['ways'] += 1
