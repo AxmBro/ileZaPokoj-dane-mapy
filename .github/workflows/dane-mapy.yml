@@ -1,4 +1,4 @@
-# Miesieczna budowa danych mapy ileZaPokoj: adresy PRG + grafy drog OSM, 20 bramek jakosci, wydanie jako GitHub Release.
+# Miesieczna budowa danych mapy ileZaPokoj: adresy PRG + grafy drog OSM, bramki jakosci, wydanie jako GitHub Release.
 # Serwer sam pobiera najnowsze wydanie (model "pull") - workflow nie ma zadnego klucza do serwera. Czerwona bramka = brak wydania, serwer i uzytkownicy zostaja na poprzednich danych.
 name: dane-mapy
 
@@ -37,9 +37,11 @@ jobs:
   build:
     needs: check
     if: needs.check.outputs.skip != '1'
-    runs-on: ubuntu-latest
-    # Pelny przebieg ok. 40 min, szczyt ok. 4,1 GB RAM i 7,7 GB dysku (pomiar lokalny 2026-11-07).
-    timeout-minutes: 150
+    # ARM, bo runnery x64 bywaja w sieci Amazona, ktorej czesc Geofabrik odrzuca (3.42.157.0/24: 1 z 40 runnerow, 2 z 9
+    # naszych przebiegow, pomiar 2026-11-25); ARM sa tylko w Azure, 22 z 22 polaczone.
+    runs-on: ubuntu-24.04-arm
+    # Grafy wszystkich powiatow i ich bramki; czas przebiegu 2026-11-24 w README.
+    timeout-minutes: 240
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -68,7 +70,14 @@ jobs:
           fi
       - name: Budowa z bramkami
         run: node pipeline/run_pipeline.mjs --pylib=pylib --publish=out $PREV_ARG
+      - name: Alarmy bramek
+        run: grep -h ALARM build/run-*/logs/gates.log | sed 's/^/::warning title=Bramka::/' || true
+      - name: Falsyfikacja bramek grafu
+        if: github.ref_name != 'main'
+        run: node pipeline/falsify_graph.mjs build/run-* out/current/counts.json falsify-tmp
+      # Wydanie tylko z main: przebieg reczny z innej galezi to proba (raporty i grafy w artefakcie), serwer jej nie zobaczy.
       - name: Wydanie
+        if: github.ref_name == 'main'
         run: |
           dir=$(date -u +%Y%m%d-%H%M%S)
           mkdir -p release
@@ -88,4 +97,31 @@ jobs:
             build/run-*/run_status.json
             build/run-*/gates_report.json
             build/run-*/logs/
+            build/run-*/graph/graph_stats.json
+            build/run-*/osm/osm_extract_stats.json
+          retention-days: 35
+      - name: Grafy z proby
+        if: github.ref_name != 'main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: grafy-${{ github.run_id }}
+          path: |
+            out/current/graph-*.gz
+            out/current/manifest.json
+          retention-days: 7
+      # Wzorzec tras to alarm w podsumowaniu. Na koncu, zeby brak czasu, dysku albo pamieci nie zabral wydania ani raportow.
+      - name: Wzorzec tras (OSRM)
+        continue-on-error: true
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
+          work=$(ls -d build/run-*)
+          node pipeline/osrm_reference.mjs out/current "$work/osm/areas.json" dl/poland.osm.pbf osrm-tmp osrm_reference.json | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: osrm-${{ github.run_id }}
+          path: osrm_reference.json
+          if-no-files-found: ignore
           retention-days: 35

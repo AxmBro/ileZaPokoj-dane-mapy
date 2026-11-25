@@ -1,7 +1,8 @@
 {
- "note": "Obszary grafu drog. top20 = miasta z najwiekszym popytem na pokoje; capital = stolice wojewodztw spoza top20; academic = miasta z uczelnia publiczna lub filia spoza obu list; agglomerations = jeden graf dla kilku gmin.",
- "bufferM": 3000,
+ "note": "Obszary grafu drog. top20 = miasta z najwiekszym popytem na pokoje; capital = stolice wojewodztw spoza top20; academic = miasta z uczelnia publiczna lub filia spoza obu list; agglomerations = jeden graf dla kilku gmin; allPowiats = kazdy pozostaly powiat kraju jako osobny obszar.",
+ "bufferM": 8000,
  "coverageM": 1500,
+ "allPowiats": true,
  "cities": {
   "top20": ["Warszawa","Kraków","Poznań","Wrocław","Lublin","Rzeszów","Łódź","Białystok","Gdańsk","Katowice","Kielce","Szczecin","Zielona Góra","Bydgoszcz","Toruń","Olsztyn","Opole","Gdynia","Koszalin","Bielsko-Biała"],
   "capital": ["Gorzów Wielkopolski"],

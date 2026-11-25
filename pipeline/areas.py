@@ -68,19 +68,21 @@ def add(slug_, kind, names):
                   'buffer': geo(grow(core, cfg['bufferM'])), 'coverage': geo(grow(core, cfg['coverageM']))})
 
 
-# Wariant pomiarowy: wszystkie powiaty kraju, bez listy nazw.
-if cfg.get('allPowiats'):
-    for b in bounds:
-        if b['lvl'] == '6' and len(b['terc']) == 4:
-            core = shape(b['geo']).buffer(0)
-            areas.append({'slug': b['terc'], 'kind': 'powiat', 'names': [b['name']], 'terc': [b['terc']],
-                          'coreBbox': [round(v, 4) for v in core.bounds], 'buffer': geo(grow(core, cfg['bufferM'])), 'coverage': geo(grow(core, cfg['coverageM']))})
 for kind, names in cfg['cities'].items():
     for n in names:
         add(slug(n), kind, [n])
 for name, names in cfg['agglomerations'].items():
     add(name, 'agglomeration', names)
-json.dump({'snapshot': snapshot, 'areas': areas, 'missing': missing}, open(out_file, 'w', encoding='utf8'), ensure_ascii=False)
+# Reszta kraju: kazdy powiat jako obszar, wiec trasa po drogach nie zalezy od listy miast. Miasto na prawach powiatu z listy
+# wyzej ma juz swoj plik. Lista miast i aglomeracji zostaje: daje mniejszy plik (miasto) albo jeden wspolny (aglomeracja).
+if cfg.get('allPowiats'):
+    taken = {a['terc'][0] for a in areas if len(a['terc']) == 1}
+    for b in bounds:
+        if b['lvl'] == '6' and len(b['terc']) == 4 and b['terc'] not in taken:
+            core = shape(b['geo']).buffer(0)
+            areas.append({'slug': b['terc'], 'kind': 'powiat', 'names': [b['name']], 'terc': [b['terc']],
+                          'coreBbox': [round(v, 4) for v in core.bounds], 'buffer': geo(grow(core, cfg['bufferM'])), 'coverage': geo(grow(core, cfg['coverageM']))})
+json.dump({'snapshot': snapshot, 'bufferM': cfg['bufferM'], 'coverageM': cfg['coverageM'], 'areas': areas, 'missing': missing}, open(out_file, 'w', encoding='utf8'), ensure_ascii=False)
 print('obszary', len(areas), 'nierozwiazane', missing, flush=True)
 if missing:
     print('GATE:area-resolve', '; '.join(missing), flush=True)

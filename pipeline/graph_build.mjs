@@ -18,17 +18,26 @@ fs.mkdirSync(outDir, { recursive: true });
 const COARSE_MAX_CLASS = 7;
 const COARSE_TERTIARY_MAX_CLASS = 9;
 const SIGNAL_S = 2;
+const NO_SNAP_MAX_CLASS = 1; // motorway, motorway_link: dom nie ma z nich wjazdu
+const ISLAND_MIN_NODES = 1000; // mniejszy odciety kawalek to wjazd albo plac, nie drugi brzeg rzeki
+// Skracanie drogi do cieciwy nie moze odsunac jej od przebiegu dalej niz tyle: do cieciwy przyciaga sie punkt i z niej jest kat skretu.
+// 2654 pary wobec OSRM: p90 km 2,9 -> 2,1%, ponad 5% 5,8 -> 4,2% par; 10 m nie daje wiecej na osobnych 80 parach, pliki rosna.
+const CHORD_M = 20;
+// Drogi glowne (secondary i wyzej) z szerszego prostokata: najblizszy most bywa poza buforem 8 km i trasa na drugi brzeg byla o polowe za dluga.
+// 6536 tras nad rzekami: km ponad 5% u 29 -> 8, do 25 km 0; 0,25 nie lepiej, a pliki wieksze.
+const RING_LAT = 0.15; // ok. 17 km
+const RING_LON = 0.24;
 const BUFFER_RASTER = 0.002; // stopnie, ok. 140-220 m; rozdzielczosc wyboru drog do obszaru
 
-// 1. Wczytanie drog do tablic typowanych. Rekord: <d way id><B klasa><B flagi><f predkosc><I n><d id * n><i lon, lat * n>.
+// 1. Wczytanie drog do tablic typowanych. Rekord: <d way id><B klasa><B flagi><f predkosc w przod><f w tyl><I n><d id * n><i lon, lat * n>.
 const raw = fs.readFileSync(path.join(osmDir, "ways.bin"));
 let nw = 0;
 let refs = 0;
 for (let p = 0; p < raw.length; ) {
-  const k = raw.readUInt32LE(p + 14);
+  const k = raw.readUInt32LE(p + 18);
   nw += 1;
   refs += k;
-  p += 18 + k * 16;
+  p += 22 + k * 16;
 }
 if (nw === 0) {
   console.log("GATE:osm-input ways.bin pusty");
@@ -37,7 +46,9 @@ if (nw === 0) {
 const wayClass = new Uint8Array(nw);
 const wayFlags = new Uint8Array(nw);
 const waySpeed = new Float32Array(nw);
+const waySpeedBack = new Float32Array(nw);
 const wayStart = new Uint32Array(nw + 1);
+const wayIdx = new Map();
 const refId = new Float64Array(refs);
 const refLon = new Int32Array(refs);
 const refLat = new Int32Array(refs);
@@ -45,12 +56,14 @@ const refLat = new Int32Array(refs);
   let p = 0;
   let r = 0;
   for (let w = 0; w < nw; w += 1) {
+    wayIdx.set(raw.readDoubleLE(p), w);
     wayClass[w] = raw[p + 8];
     wayFlags[w] = raw[p + 9];
     waySpeed[w] = raw.readFloatLE(p + 10);
-    const k = raw.readUInt32LE(p + 14);
+    waySpeedBack[w] = raw.readFloatLE(p + 14);
+    const k = raw.readUInt32LE(p + 18);
     wayStart[w] = r;
-    p += 18;
+    p += 22;
     for (let i = 0; i < k; i += 1) refId[r + i] = raw.readDoubleLE(p + i * 8);
     p += k * 8;
     for (let i = 0; i < k; i += 1) {
@@ -122,6 +135,73 @@ for (let w = 0; w < nw; w += 1) {
 }
 log(`wezly ${nodeCount}`);
 
+// Zakazy skretu po wezle krajowym: [only, droga wjazdu, droga wyjazdu] (indeksy drog). Droga nie dla aut = zakaz bez znaczenia.
+const restrictionsAt = new Map();
+const restrictionCount = { input: 0, usable: 0 };
+for (const r of readJson(path.join(osmDir, "restrictions.json"))) {
+  restrictionCount.input += 1;
+  const from = wayIdx.get(r.from);
+  const to = wayIdx.get(r.to);
+  const via = findNode(r.via);
+  if (from === undefined || to === undefined || via < 0) continue;
+  restrictionCount.usable += 1;
+  const list = restrictionsAt.get(via);
+  if (list) list.push([r.only, from, to]);
+  else restrictionsAt.set(via, [[r.only, from, to]]);
+}
+log(`zakazy ${restrictionCount.usable} z ${restrictionCount.input}`);
+
+// Zakazy na krawedziach grafu skroconego: trojki (u, v, w). Niejednoznaczne (droga przechodzi przez wezel via na wylot,
+// wiec nie wiadomo, ktora strona) sa pomijane i liczone. only_* bez drogi docelowej w pliku (granica obszaru) nie blokuje
+// reszty wyjazdow. from = to oznacza zakaz zawracania: tylko powrot ta sama droga.
+function bansOf(n, m, eu, ev, first, last, globalIdx) {
+  const st = { mapped: 0, ambiguous: 0, missing: 0 };
+  const seen = new Set();
+  const triples = [];
+  const add = (u, v, w) => {
+    const k = `${u},${v},${w}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    triples.push(u, v, w);
+  };
+  const off = new Int32Array(n + 1);
+  for (let e = 0; e < m; e += 1) off[eu[e] + 1] += 1;
+  for (let i = 0; i < n; i += 1) off[i + 1] += off[i];
+  const inOff = new Int32Array(n + 1);
+  for (let e = 0; e < m; e += 1) inOff[ev[e] + 1] += 1;
+  for (let i = 0; i < n; i += 1) inOff[i + 1] += inOff[i];
+  const pos = inOff.slice();
+  const inE = new Int32Array(m);
+  for (let e = 0; e < m; e += 1) inE[pos[ev[e]]++] = e;
+  for (let v = 0; v < n; v += 1) {
+    const list = restrictionsAt.get(globalIdx[v]);
+    if (!list) continue;
+    const ins = Array.from(inE.subarray(inOff[v], inOff[v + 1]));
+    const outs = [];
+    for (let e = off[v]; e < off[v + 1]; e += 1) outs.push(e);
+    for (const [only, from, to] of list) {
+      const a = ins.filter((e) => last[e] === from);
+      const b = outs.filter((e) => first[e] === to);
+      if (!a.length || !b.length) {
+        st.missing += 1;
+      } else if (from === to) {
+        if (only) st.ambiguous += 1;
+        else {
+          st.mapped += 1;
+          for (const e of a) if (b.some((o) => ev[o] === eu[e])) add(eu[e], v, eu[e]);
+        }
+      } else if (a.length > 1 || b.length > 1) {
+        st.ambiguous += 1;
+      } else {
+        st.mapped += 1;
+        if (!only) add(eu[a[0]], v, ev[b[0]]);
+        else for (const o of outs) if (o !== b[0]) add(eu[a[0]], v, ev[o]);
+      }
+    }
+  }
+  return { triples: Int32Array.from(triples), stats: st };
+}
+
 const morton = (x, y) => {
   let r = 0;
   let p = 1;
@@ -160,7 +240,9 @@ function buildGraph(wayList, keepMask) {
   const segL = new Float32Array(refSum);
   const segT = new Float32Array(refSum);
   const segW = new Float32Array(refSum);
+  const segBack = new Float32Array(refSum); // ile razy wolniej w tyl niz w przod
   const segFlag = new Uint8Array(refSum);
+  const segWay = new Int32Array(refSum);
   let S = 0;
   let droppedBarrier = 0;
   const local = (g) => {
@@ -177,6 +259,7 @@ function buildGraph(wayList, keepMask) {
     const bw = wayFlags[w] & 2;
     const pen = wayFlags[w] & 4 ? 0.5 : 1;
     const ms = (waySpeed[w] * 1000) / 3600;
+    const back = waySpeed[w] / waySpeedBack[w];
     let prevG = refNode[wayStart[w]];
     let prev = local(prevG);
     for (let r = wayStart[w] + 1; r < wayStart[w + 1]; r += 1) {
@@ -201,7 +284,9 @@ function buildGraph(wayList, keepMask) {
       segL[S] = L;
       segT[S] = tt;
       segW[S] = tt / pen;
+      segBack[S] = back;
       segFlag[S] = (fw ? 1 : 0) | (bw ? 2 : 0);
+      segWay[S] = w;
       S += 1;
       prev = cur;
       prevG = curG;
@@ -239,6 +324,7 @@ function buildGraph(wayList, keepMask) {
   const low = new Int32Array(N0);
   const onStack = new Uint8Array(N0);
   const comp = new Int32Array(N0).fill(-1);
+  const compSize = [];
   const stack = new Int32Array(N0);
   const cs = new Int32Array(N0);
   const ci = new Int32Array(N0);
@@ -277,6 +363,7 @@ function buildGraph(wayList, keepMask) {
             comp[w] = compCount;
             size += 1;
           } while (w !== v);
+          compSize.push(size);
           if (size > mainSize) {
             mainSize = size;
             main = compCount;
@@ -333,6 +420,8 @@ function buildGraph(wayList, keepMask) {
     if (many || b < 0) continue;
     if (hasIn(inn, n, a) === hasIn(out, n, b) && hasIn(inn, n, b) === hasIn(out, n, a)) removable[n] = 1;
   }
+  // Graf zgrubny (bez maski) prowadzi tylko dalekie trasy, a kazdy jego wezel jest portalem w plikach obszarow.
+  if (keepMask) keepBends(N0, comp, main, removable, out, toGlobal);
   const isSignal = (n) => nodeFlag[toGlobal[n]] & 2;
   let eCap = D2 + 16;
   let eU = new Int32Array(eCap);
@@ -340,6 +429,9 @@ function buildGraph(wayList, keepMask) {
   let eL = new Float32Array(eCap);
   let eW = new Float32Array(eCap);
   let eT = new Float32Array(eCap);
+  const eFirst = new Int32Array(eCap);
+  const eLast = new Int32Array(eCap);
+  const eNs = new Uint8Array(eCap);
   let E = 0;
   for (let n = 0; n < N0; n += 1) {
     if (comp[n] !== main || removable[n]) continue;
@@ -348,8 +440,11 @@ function buildGraph(wayList, keepMask) {
       let cur = out.to[e];
       let s = out.ref[e];
       let l = segL[s];
-      let w = segW[s];
-      let t = segT[s];
+      const factor = (x, from) => (segU[x] === from ? 1 : segBack[x]);
+      let w = segW[s] * factor(s, n);
+      let t = segT[s] * factor(s, n);
+      const firstWay = segWay[s];
+      let noSnap = wayClass[firstWay] <= NO_SNAP_MAX_CLASS;
       if (isSignal(cur)) {
         w += SIGNAL_S;
         t += SIGNAL_S;
@@ -361,8 +456,9 @@ function buildGraph(wayList, keepMask) {
         if (nextE < 0) break;
         s = out.ref[nextE];
         l += segL[s];
-        w += segW[s];
-        t += segT[s];
+        w += segW[s] * factor(s, cur);
+        t += segT[s] * factor(s, cur);
+        if (wayClass[segWay[s]] <= NO_SNAP_MAX_CLASS) noSnap = true;
         prev = cur;
         cur = out.to[nextE];
         if (isSignal(cur)) {
@@ -377,6 +473,9 @@ function buildGraph(wayList, keepMask) {
       eL[E] = l;
       eW[E] = w;
       eT[E] = t;
+      eFirst[E] = firstWay;
+      eLast[E] = segWay[s];
+      eNs[E] = noSnap ? 1 : 0;
       E += 1;
     }
   }
@@ -418,6 +517,9 @@ function buildGraph(wayList, keepMask) {
   const fl = new Float32Array(E);
   const fw = new Float32Array(E);
   const ft = new Float32Array(E);
+  const first = new Int32Array(E);
+  const last = new Int32Array(E);
+  const ns = new Uint8Array(E);
   let m = 0;
   for (let i = 0; i < E; i += 1) {
     const o = order[i];
@@ -427,6 +529,9 @@ function buildGraph(wayList, keepMask) {
     fl[m] = eL[o];
     fw[m] = eW[o];
     ft[m] = eT[o];
+    first[m] = eFirst[o];
+    last[m] = eLast[o];
+    ns[m] = eNs[o];
     m += 1;
   }
   const latE5 = new Int32Array(n);
@@ -438,12 +543,64 @@ function buildGraph(wayList, keepMask) {
     latE5[i] = Math.round(nodeLat[g] / 100);
     lonE5[i] = Math.round(nodeLon[g] / 100);
   }
+  const bans = bansOf(n, m, fu, fv, first, last, globalIdx);
+  const side = new Int8Array(N0);
+  for (let i = 0; i < N0; i += 1) side[i] = comp[i] === main ? 1 : compSize[comp[i]] >= ISLAND_MIN_NODES ? -1 : 0;
   return {
-    n, m, latE5, lonE5, eu: fu, ev: fv, el: fl, ew: fw, et: ft, globalIdx,
+    n, m, latE5, lonE5, eu: fu, ev: fv, el: fl, ew: fw, et: ft, ens: ns, bans: bans.triples, banStats: bans.stats, globalIdx, toGlobal, side,
     rawNodes: N0, rawSegments: S, droppedBarrier, sccCount: compCount, sccMainPct: Math.round((1e4 * mainSize) / N0) / 100,
   };
 }
 
+// Wezly zakretow (Douglas-Peucker na kazdym lancuchu wezlow do usuniecia) zostaja w grafie.
+function keepBends(N0, comp, main, removable, out, toGlobal) {
+  const x = (n) => (nodeLon[toGlobal[n]] / 1e7) * 111195 * Math.cos((nodeLat[toGlobal[n]] / 1e7) * (Math.PI / 180));
+  const y = (n) => (nodeLat[toGlobal[n]] / 1e7) * 111195;
+  const keep = [];
+  for (let n = 0; n < N0; n += 1) {
+    if (comp[n] !== main || removable[n]) continue;
+    for (let e = out.off[n]; e < out.off[n + 1]; e += 1) {
+      const chain = [n];
+      let prev = n;
+      let cur = out.to[e];
+      while (removable[cur] && chain.length < 100000) {
+        chain.push(cur);
+        let next = -1;
+        for (let q = out.off[cur]; q < out.off[cur + 1]; q += 1) if (out.to[q] !== prev) next = out.to[q];
+        if (next < 0) break;
+        prev = cur;
+        cur = next;
+      }
+      if (chain.length < 2) continue;
+      chain.push(cur);
+      const stack = [[0, chain.length - 1]];
+      while (stack.length) {
+        const [a, b] = stack.pop();
+        const ax = x(chain[a]);
+        const ay = y(chain[a]);
+        const dx = x(chain[b]) - ax;
+        const dy = y(chain[b]) - ay;
+        const len2 = dx * dx + dy * dy;
+        let far = 0;
+        let at = -1;
+        for (let i = a + 1; i < b; i += 1) {
+          const px = x(chain[i]) - ax;
+          const py = y(chain[i]) - ay;
+          const t = len2 ? Math.max(0, Math.min(1, (px * dx + py * dy) / len2)) : 0;
+          const d = Math.hypot(px - t * dx, py - t * dy);
+          if (d > far) {
+            far = d;
+            at = i;
+          }
+        }
+        if (far <= CHORD_M) continue;
+        keep.push(chain[at]);
+        stack.push([a, at], [at, b]);
+      }
+    }
+  }
+  for (const n of keep) removable[n] = 0;
+}
 // Rasteryzacja (Multi)Polygonu GeoJSON na siatke: linia skanu po srodkach wierszy, regula parzystosci.
 function rasterize(geo, lat0, lon0, dLat, dLon, nx, ny) {
   const bits = new Uint8Array(nx * ny);
@@ -485,7 +642,7 @@ function polygonBounds(geo) {
   }
   return [a, b, c, d];
 }
-function selectWays(geo) {
+function selectWays(geo, ring) {
   const [x0, y0, x1, y1] = polygonBounds(geo);
   const nx = Math.ceil((x1 - x0) / BUFFER_RASTER) + 1;
   const ny = Math.ceil((y1 - y0) / BUFFER_RASTER) + 1;
@@ -499,8 +656,14 @@ function selectWays(geo) {
   const b = Math.ceil(y1 * 1e7);
   const c = Math.floor(x0 * 1e7);
   const d = Math.ceil(x1 * 1e7);
+  const ringLat = RING_LAT * 1e7;
+  const ringLon = RING_LON * 1e7;
   const list = [];
   for (let w = 0; w < nw; w += 1) {
+    if (ring && wayClass[w] <= COARSE_MAX_CLASS && wMaxLat[w] > a - ringLat && wMinLat[w] < b + ringLat && wMaxLon[w] > c - ringLon && wMinLon[w] < d + ringLon) {
+      list.push(w);
+      continue;
+    }
     if (wMaxLat[w] < a || wMinLat[w] > b || wMaxLon[w] < c || wMinLon[w] > d) continue;
     for (let r = wayStart[w]; r < wayStart[w + 1]; r += 1) {
       if (inRaster(refLat[r], refLon[r])) {
@@ -511,33 +674,87 @@ function selectWays(geo) {
   }
   return list;
 }
-function coverageOf(geo) {
+// Kawalek sieci odciety od reszty pliku (drugi brzeg rzeki, gdy most lezy za buforem) nie wchodzi do grafu, wiec plik nie moze
+// deklarowac tam zasiegu: punkt przeskoczylby rzeke do najblizszej drogi, ktora zostala. Komorka bez drog bierze strone
+// najblizszej komorki z drogami.
+function trimIslands(bits, lat0, lon0, nx, ny, g) {
+  const sum = new Int32Array(nx * ny);
+  let islands = false;
+  for (let i = 0; i < g.side.length; i += 1) {
+    const n = g.toGlobal[i];
+    const x = Math.floor((nodeLon[n] / 1e7 - lon0) / COVER_DLON);
+    const y = Math.floor((nodeLat[n] / 1e7 - lat0) / COVER_DLAT);
+    if (x < 0 || y < 0 || x >= nx || y >= ny) continue;
+    sum[y * nx + x] += g.side[i];
+    if (g.side[i] < 0) islands = true;
+  }
+  if (!islands) return 0;
+  const side = new Int8Array(nx * ny);
+  const queue = [];
+  for (let c = 0; c < side.length; c += 1) {
+    side[c] = Math.sign(sum[c]);
+    if (side[c]) queue.push(c);
+  }
+  for (let q = 0; q < queue.length; q += 1) {
+    const c = queue[q];
+    const x = c % nx;
+    for (const t of [x > 0 ? c - 1 : -1, x < nx - 1 ? c + 1 : -1, c - nx, c + nx]) {
+      if (t < 0 || t >= side.length || side[t]) continue;
+      side[t] = side[c];
+      queue.push(t);
+    }
+  }
+  let cut = 0;
+  for (let c = 0; c < side.length; c += 1) {
+    if (bits[c] && side[c] < 0) {
+      bits[c] = 0;
+      cut += 1;
+    }
+  }
+  return cut;
+}
+function coverageOf(geo, g) {
   const [x0, y0, x1, y1] = polygonBounds(geo);
   const lat0 = Math.floor(y0 / COVER_DLAT) * COVER_DLAT;
   const lon0 = Math.floor(x0 / COVER_DLON) * COVER_DLON;
   const nx = Math.ceil((x1 - lon0) / COVER_DLON);
   const ny = Math.ceil((y1 - lat0) / COVER_DLAT);
   const bits = rasterize(geo, lat0, lon0, COVER_DLAT, COVER_DLON, nx, ny);
+  const cut = trimIslands(bits, lat0, lon0, nx, ny, g);
   let set = 0;
   for (let i = 0; i < bits.length; i += 1) set += bits[i];
-  return { meta: { lat0: +lat0.toFixed(4), lon0: +lon0.toFixed(4), dLat: COVER_DLAT, dLon: COVER_DLON, nx, ny, cellsSet: set }, encoded: encodeCoverage(bits) };
+  return { meta: { lat0: +lat0.toFixed(4), lon0: +lon0.toFixed(4), dLat: COVER_DLAT, dLon: COVER_DLON, nx, ny, cellsSet: set }, cut, encoded: encodeCoverage(bits) };
 }
 
 const areas = readJson(areasFile);
 const snapshot = areas.snapshot || "";
 const results = [];
+// Dlugie mosty glownych drog (do tertiary_link): srodek w 1e-4 stopnia, do bramki `bridges`.
+const BRIDGE_FLAG = 16;
+const BRIDGE_MAX_CLASS = 9;
+const BRIDGE_MIN_M = 80;
+const bridges = [];
+for (let w = 0; w < nw; w += 1) {
+  if (!(wayFlags[w] & BRIDGE_FLAG) || wayClass[w] > BRIDGE_MAX_CLASS) continue;
+  const cos = Math.cos((refLat[wayStart[w]] / 1e7) * (Math.PI / 180));
+  let m = 0;
+  for (let r = wayStart[w] + 1; r < wayStart[w + 1]; r += 1) m += Math.hypot((refLat[r] - refLat[r - 1]) * 0.011132, (refLon[r] - refLon[r - 1]) * 0.011132 * cos);
+  if (m < BRIDGE_MIN_M) continue;
+  const mid = (wayStart[w] + wayStart[w + 1]) >> 1;
+  bridges.push([Math.round(refLat[mid] / 1000), Math.round(refLon[mid] / 1000)]);
+}
 const attribution = "OpenStreetMap contributors, ODbL 1.0";
 
 function finish(slug, kind, g, cover, portals, extra = {}) {
-  const header = { format: 1, area: slug, kind, snapshot, attribution, ...(cover ? { coverage: cover.meta } : {}), ...extra };
+  const header = { format: 2, area: slug, kind, snapshot, attribution, ...(cover ? { coverage: cover.meta } : {}), ...extra };
   const { file, storedBoth, storedOneway } = encodeGraph(g, header, cover?.encoded, portals);
   const gz = gzip(file);
   const name = `graph-${slug}.bin.gz`;
   fs.writeFileSync(path.join(outDir, name), gz);
   const rec = {
     file: name, area: slug, kind, nodes: g.n, edges: g.m, rawNodes: g.rawNodes, rawSegments: g.rawSegments, droppedBarrier: g.droppedBarrier,
-    sccCount: g.sccCount, sccMainPct: g.sccMainPct, raw: file.length, gzip: gz.length, sha256: sha256(gz), storedBoth, storedOneway,
-    portals: portals ? portals.length / 2 : 0, coverageBytes: cover ? cover.encoded.length : 0, coverageCells: cover ? cover.meta.cellsSet : 0,
+    bans: g.bans.length / 3, banStats: g.banStats, sccCount: g.sccCount, sccMainPct: g.sccMainPct, raw: file.length, gzip: gz.length, sha256: sha256(gz), storedBoth, storedOneway,
+    portals: portals ? portals.length / 2 : 0, coverageBytes: cover ? cover.encoded.length : 0, coverageCells: cover ? cover.meta.cellsSet : 0, coverageCut: cover ? cover.cut : 0,
     coverage: cover ? { ...cover.meta, rle: cover.encoded.toString("base64") } : null,
   };
   results.push(rec);
@@ -563,7 +780,7 @@ for (let i = 0; i < coarse.n; i += 1) {
 const variantsOut = {};
 if (variants) {
   const v = buildGraph(tertiaryWays, null);
-  const { file } = encodeGraph(v, { format: 1, area: "coarse-tertiary" }, null, null);
+  const { file } = encodeGraph(v, { format: 2, area: "coarse-tertiary" }, null, null);
   variantsOut.coarseTertiary = { nodes: v.n, edges: v.m, raw: file.length, gzip: gzip(file).length, sccMainPct: v.sccMainPct };
   log("zgrubny z tertiary", JSON.stringify(variantsOut.coarseTertiary));
 }
@@ -571,23 +788,24 @@ if (variants) {
 variantsOut.noServiceMinor = {};
 for (const a of areas.areas) {
   const t1 = Date.now();
-  const list = selectWays(a.buffer);
+  const list = selectWays(a.buffer, true);
   const g = buildGraph(list, keepMask);
   const portals = [];
   for (let i = 0; i < g.n; i += 1) {
     const c = coarseIdxOf[g.globalIdx[i]];
     if (c >= 0) portals.push(i, c);
   }
-  const cover = coverageOf(a.coverage);
+  // Zasieg z samej sieci bufora: pierscien laczy drugi brzeg glowna droga, ale lokalne drogi za rzeka konczy bufor.
+  const cover = coverageOf(a.coverage, buildGraph(selectWays(a.buffer, false), keepMask));
   const rec = finish(a.slug, a.kind, g, cover, Int32Array.from(portals), { coarseSha: coarseRec.sha256, terc: a.terc });
   rec.buildMs = Date.now() - t1;
   rec.terc = a.terc;
   if (variants) {
     const g2 = buildGraph(list.filter((w) => !(wayFlags[w] & 8)), keepMask);
-    const { file } = encodeGraph(g2, { format: 1, area: a.slug }, cover.encoded, null);
+    const { file } = encodeGraph(g2, { format: 2, area: a.slug }, cover.encoded, null);
     variantsOut.noServiceMinor[a.slug] = { nodes: g2.n, edges: g2.m, raw: file.length, gzip: gzip(file).length };
   }
-  log(`${a.slug}: drogi ${list.length}, wezly ${g.n}, krawedzie ${g.m}, gzip ${rec.gzip}, portale ${rec.portals}, SCC ${g.sccMainPct}%, ${rec.buildMs} ms`);
+  log(`${a.slug}: drogi ${list.length}, wezly ${g.n}, krawedzie ${g.m}, gzip ${rec.gzip}, portale ${rec.portals}, SCC ${g.sccMainPct}%, zasieg obciety o ${cover.cut} komorek, ${rec.buildMs} ms`);
 }
 // Pomiar odniesienia, bez zapisu do publikacji: siec aut calego kraju jako jeden plik i jako 380 plikow powiatowych.
 const powiatsArg = opts.find((o) => o.startsWith("--powiats="))?.slice(10);
@@ -595,19 +813,19 @@ if (powiatsArg) {
   const all = [];
   for (let w = 0; w < nw; w += 1) all.push(w);
   const g = buildGraph(all, null);
-  const { file } = encodeGraph(g, { format: 1, area: "polska" }, null, null);
+  const { file } = encodeGraph(g, { format: 2, area: "polska" }, null, null);
   variantsOut.nationalFull = { nodes: g.n, edges: g.m, raw: file.length, gzip: gzip(file).length, sccMainPct: g.sccMainPct, rawNodes: g.rawNodes };
   log("caly kraj", JSON.stringify(variantsOut.nationalFull));
   const rows = [];
   for (const a of readJson(powiatsArg).areas) {
     const gp = buildGraph(selectWays(a.buffer), keepMask);
-    const e = encodeGraph(gp, { format: 1, area: a.slug }, null, null);
+    const e = encodeGraph(gp, { format: 2, area: a.slug }, null, null);
     rows.push({ area: a.slug, nodes: gp.n, raw: e.file.length, gzip: gzip(e.file).length, sccMainPct: gp.sccMainPct });
   }
   rows.sort((x, y) => y.gzip - x.gzip);
   variantsOut.perPowiat = { files: rows.length, gzip: rows.reduce((s, r) => s + r.gzip, 0), raw: rows.reduce((s, r) => s + r.raw, 0), max: rows[0], median: rows[rows.length >> 1], min: rows[rows.length - 1] };
   log("powiaty", JSON.stringify(variantsOut.perPowiat));
 }
-writeJson(path.join(outDir, "graph_stats.json"), { snapshot, nodesNational: nodeCount, waysNational: nw, results, variants: variantsOut });
+writeJson(path.join(outDir, "graph_stats.json"), { snapshot, bufferM: areas.bufferM, restrictions: restrictionCount, bridges, nodesNational: nodeCount, waysNational: nw, results, variants: variantsOut });
 reportResources(path.join(outDir, "graph_build.res.json"), { seconds: Math.round((Date.now() - t0) / 1000) });
 log("gotowe");

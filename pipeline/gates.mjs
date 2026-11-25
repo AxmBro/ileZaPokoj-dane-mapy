@@ -9,7 +9,8 @@ import { dist, hav, readJson, reportResources, rng, sha256, writeJson } from "./
 import { createAddrIndex, decodeAddr, lookup } from "./addr_format.mjs";
 import { decodeGraph } from "./graph_format.mjs";
 import { keyOf, fold } from "./normalize.mjs";
-import { createSearch, buildSnap, locate, readTarget, seedsFrom, SNAP_MAX_M } from "./router.mjs";
+import { createEdgeSearch } from "./edge_search.mjs";
+import { buildSnap, locate, SNAP_MAX_M } from "./router.mjs";
 
 const [work, prevFile, fixDir, ...opts] = process.argv.slice(2);
 const only = opts.find((o) => o.startsWith("--only="))?.slice(7).split(",");
@@ -20,6 +21,22 @@ const LIMIT_COUNT = 20000;
 const EXPECTED_POWIATS = 380;
 const MIN_POWIAT_RATE = 0.5;
 const MAX_INPUT_AGE_DAYS = 45;
+// Relacji restriction dla aut w Polsce jest ok. 43 tys. (2026-11); polowa tego = obciete wejscie.
+const MIN_RESTRICTIONS = 20000;
+// Bufor powiatu nad woda (Zalew Szczecinski) obejmuje drugi brzeg bez mostu w pliku; drogi samego powiatu pilnuje coverage-snap.
+const MIN_SCC_POWIAT = 70;
+// Nawrot kosztuje 20 s i skret o 180 stopni; legalne obejscie przez wezly tego samego skrzyzowania (3-metrowe laczniki) ok. 16 s.
+const U_TURN_EXTRA_S = 25;
+const TURN_SAMPLE = 500;
+// Pomiar 387 obszarow (2026-11): najwiecej 0,31% - przejscie graniczne, gdzie jedyny wjazd z polskiej strony jest zakazany.
+const MAX_LOST_SHARE = 0.01;
+// Promien mniejszy niz odstep sasiednich mostow tej samej rzeki, wiekszy niz odstep dwoch jezdni i przesuniecie srodka po podziale drogi.
+const BRIDGE_NEAR_M = 60;
+const MAX_BRIDGES_LOST = 0.02;
+// Pomiar 2026-11 na 154 174 adresach: 22 przed obcieciem zasiegu w graph_build (`trimIslands`), 0 po nim.
+const SIDE_SAMPLE = 400;
+const MAX_WRONG_SIDE = 5e-5;
+const MIN_BRIDGES = 1000;
 const rand = rng(20261107);
 
 const prg = readJson(path.join(work, "prg", "prg_stats.json"));
@@ -415,13 +432,15 @@ const GRAPH_LIST = graphStats.results.filter((r) => r.kind !== "coarse");
 const prevGraph = prev.graphs || {};
 gate("graph-sanity", "puste lub rozsypane miasto, ucieta siec, skok rozmiaru", "brak pojedynczej ulicy, zle kierunki, bledne limity predkosci", () => {
   const bad = [];
+  // Inny bufor = inny wybor drog, wiec liczba wezlow nie mowi nic o ubytku; delta wraca od nastepnego wydania.
+  const sameBuffer = (prev.bufferM ?? 3000) === graphStats.bufferM;
   for (const r of GRAPH_LIST) {
-    if (r.nodes < 500 || r.sccMainPct < 80 || !r.portals) bad.push(`${r.area}:nodes=${r.nodes},scc=${r.sccMainPct},portale=${r.portals}`);
+    if (r.nodes < 500 || r.sccMainPct < (r.kind === "powiat" ? MIN_SCC_POWIAT : 80) || !r.portals) bad.push(`${r.area}:nodes=${r.nodes},scc=${r.sccMainPct},portale=${r.portals}`);
     const p = prevGraph[r.area];
-    if (p && (r.nodes / p < 0.9 || r.nodes / p > 1.15)) bad.push(`${r.area}:wezly ${r.nodes} wobec ${p}`);
+    if (p && sameBuffer && (r.nodes / p < 0.9 || r.nodes / p > 1.15)) bad.push(`${r.area}:wezly ${r.nodes} wobec ${p}`);
   }
   const worst = Math.min(...GRAPH_LIST.map((r) => r.sccMainPct));
-  return { ok: !bad.length, info: `obszary ${GRAPH_LIST.length}, najnizszy SCC ${worst}%, zle: ${bad.slice(0, 8).join(" ") || "-"}` };
+  return { ok: !bad.length, info: `obszary ${GRAPH_LIST.length}, najnizszy SCC ${worst}%, bufor ${graphStats.bufferM} m${sameBuffer ? "" : " (zmieniony, delta wezlow pominieta)"}, zle: ${bad.slice(0, 8).join(" ") || "-"}` };
 });
 
 // Punkty kontrolne zasiegu; wspolrzedne reczne, orientacyjne, jak w weryfikacji sekcja D.
@@ -436,7 +455,9 @@ const runtime = new Map();
 function rt(area) {
   if (!runtime.has(area)) {
     const g = decodeGraph(gunzipFile(`graph-${area}.bin.gz`));
-    runtime.set(area, { g, snapper: buildSnap(g, area === "coarse" ? 1000 : 250), search: createSearch(g) });
+    // Mutant dla falsify_graph.mjs: wyszukiwarka, ktora nie widzi zakazow.
+    if (process.env.FALSIFY_IGNORE_BANS) g.hasBan?.fill(0);
+    runtime.set(area, { g, snapper: buildSnap(g, area === "coarse" ? 1000 : 250), search: createEdgeSearch(g) });
     if (runtime.size > 3) runtime.delete(runtime.keys().next().value);
   }
   return runtime.get(area);
@@ -488,6 +509,25 @@ gate("coverage-snap", "ciche wyjscie poza plik, przesuniety graf wobec adresow",
   const farShare = inCovFar / (inCov || 1);
   return { ok: !bad.length && farShare <= 0.002, info: `punkty kontrolne ${rows.length - bad.length}/${rows.length}, adresy w zasiegu ${inCov}, snap p50 ${detail.snap.all.p50} m, p99 ${detail.snap.all.p99} m, p99.9 ${detail.snap.all.p999} m, ponad ${SNAP_MAX_M} m: ${inCovFar}` };
 });
+gate("snap-side", "plik deklaruje zasieg tam, gdzie odcial drogi (drugi brzeg rzeki): punkt przyciagniety daleko, choc sasiedni plik ma jego droge", "odciety adres lezacy w jednym tylko pliku", () => {
+  const pts = [];
+  for (const [powiat, ix] of loadAddr()) {
+    const { lat, lon, header } = ix.d;
+    const step = Math.max(1, Math.floor(header.points / SIDE_SAMPLE));
+    for (let i = 0; i < header.points; i += step) pts.push({ powiat, lat: lat[i], lon: lon[i], hits: [] });
+  }
+  for (const r of GRAPH_LIST) {
+    const a = rt(r.area);
+    for (const p of pts) if (a.g.covers(p.lat, p.lon)) p.hits.push([r.area, a.snapper.snap(p.lat, p.lon)?.distM ?? Infinity]);
+  }
+  const bad = [];
+  for (const p of pts) {
+    const best = Math.min(...p.hits.map((h) => h[1]));
+    // Dalej niz SNAP_MAX_M wtyczka i tak pokazuje szacunek.
+    for (const [area, d] of p.hits) if (d <= SNAP_MAX_M && d > Math.max(150, best * 2 + 100)) bad.push(`${area}:${p.lat.toFixed(4)},${p.lon.toFixed(4)}:${Math.round(d)}m`);
+  }
+  return { ok: bad.length / (pts.length || 1) <= MAX_WRONG_SIDE, info: `adresy ${pts.length}, przyciagniete na zla strone ${bad.length}: ${bad.slice(0, 6).join(" ") || "-"}` };
+});
 gate("graph-route", "rozspojnienie sieci po skroceniu, zly dekoder dlugosci", "dokladnosci trasy; to kontrola spojnosci, nie zgodnosc z routerem", () => {
   const ratios = [];
   let pairs = 0;
@@ -512,8 +552,8 @@ gate("graph-route", "rozspojnienie sieci po skroceniu, zly dekoder dlugosci", "d
     for (let k = 0; k + 1 < pts.length && k < 40; k += 2) {
       const sa = a.snapper.snap(pts[k][0], pts[k][1]);
       const sb = a.snapper.snap(pts[k + 1][0], pts[k + 1][1]);
-      a.search.run(seedsFrom(a.g, sa));
-      const res = readTarget(a.g, a.search, sb);
+      a.search.run({ snap: sa });
+      const res = a.search.read(sb);
       pairs += 1;
       if (!res) {
         unreachable += 1;
@@ -526,6 +566,87 @@ gate("graph-route", "rozspojnienie sieci po skroceniu, zly dekoder dlugosci", "d
   const d = dist(ratios, 3);
   detail.graphRoute = { pairs, unreachable, ratio: d };
   return { ok: unreachable === 0 && d.p50 >= 1.1 && d.p50 <= 1.8 && d.p99 < 6 && !bad.length, info: `pary ${pairs}, nieosiagalne ${unreachable}, trasa/linia p50 ${d.p50}, p99 ${d.p99}, max ${d.max}; ${bad.join(" ")}` };
+});
+// Zakazy skretu: liczba w pliku = liczba z budowy (zakaz z krawedzia spoza grafu wypada w dekoderze) i bez spadku m/m.
+gate("turn-count", "zgubione zakazy: brak relacji w wejsciu, zle numery wezlow w pliku, pusty strumien", "pojedynczego zakazu usunietego z OSM", () => {
+  const bad = [];
+  const files = {};
+  for (const r of graphStats.results) {
+    const g = decodeGraph(gunzipFile(r.file));
+    files[r.area] = g.banCount ?? 0;
+    if (!g.bans || g.banCount !== r.bans) bad.push(`${r.area}:${g.banCount ?? "brak"} z ${r.bans}`);
+  }
+  const total = Object.values(files).reduce((a, b) => a + b, 0);
+  const prevTotal = prev.bans && prev.bufferM === graphStats.bufferM ? Object.entries(prev.bans).reduce((a, [k, n]) => a + (k in files ? n : 0), 0) : 0;
+  const compared = prevTotal ? Object.keys(prev.bans).reduce((a, k) => a + (files[k] ?? 0), 0) : 0;
+  const { input, usable } = graphStats.restrictions;
+  const share = usable / input;
+  detail.turnCount = { total, prevTotal, compared, input, usable };
+  return { ok: !bad.length && input >= MIN_RESTRICTIONS && share >= 0.8 && (!prevTotal || compared / prevTotal >= 0.95), info: `zakazy w plikach ${total}, wobec poprzednich ${prevTotal ? (compared / prevTotal).toFixed(3) : "-"}, relacje uzyte ${usable}/${input}, zle pliki: ${bad.slice(0, 6).join(" ") || "-"}` };
+});
+// Metoda Grasera (2014): trasa od srodka drogi wjazdu do srodka drogi wyjazdu nie moze byc zakazanym manewrem.
+// Liczona wyszukiwarka wtyczki na pliku ze stage, wiec lapie tez blad algorytmu. 100%, bo to test kodu, nie danych.
+gate("turn-legal", "zakazany manewr w trasie", "zakazu, ktorego nie ma w OSM", () => {
+  let tested = 0;
+  const bad = [];
+  for (const r of graphStats.results) {
+    const { g, search } = rt(r.area);
+    const list = [...(g.bans || [])].flatMap(([e, outs]) => outs.filter((o) => g.rev[e] !== o).map((o) => [e, o]));
+    const step = Math.max(1, Math.floor(list.length / TURN_SAMPLE));
+    for (let i = 0; i < list.length; i += step) {
+      const [e, o] = list[i];
+      const half = (g.W[e] + g.W[o]) / 2;
+      search.run({ snap: { e, f: 0.5, back: -1 }, limit: half + 30 });
+      const res = search.read({ e: o, f: 0.5, back: -1 });
+      tested += 1;
+      const extra = res ? res[1] - (g.Ln[e] + g.Ln[o]) / 2 : Infinity;
+      // Wprost = dlugosc manewru co do metra; do 10 m wiecej tylko nawrotem w kikucie. Reszta to legalne obejscie.
+      if (extra < 1 || (extra <= 10 && res[2] - (g.T[e] + g.T[o]) / 2 >= U_TURN_EXTRA_S)) bad.push(`${r.area}:${e}-${o}`);
+    }
+  }
+  return { ok: tested >= 1000 && !bad.length, info: `manewry ${tested}, zlamane ${bad.length} ${bad.slice(0, 6).join(" ")}` };
+});
+// Zakazy i brak zawracania nie moga odcinac drog, ktore bez nich byly osiagalne. Tylko zasieg pliku: przy krawedzi bufora
+// jedyny legalny dojazd bywa poza plikiem, a user tam punktu nie ma.
+gate("turn-reach", "zakazy odcinajace czesc miasta", "gorszej trasy przy zachowanej osiagalnosci", () => {
+  const bad = [];
+  let lost = 0;
+  let all = 0;
+  for (const r of GRAPH_LIST) {
+    const { g, search } = rt(r.area);
+    // Start z wezla o srodkowym numerze: skladowa glowna jest silnie spojna, wiec bez zakazow dochodzi wszedzie.
+    search.run({ nodes: [[g.n >> 1, 0, 0, 0]] });
+    let n = 0;
+    let inside = 0;
+    for (let u = 0; u < g.n; u += 1) {
+      if (!g.covers(g.lat[u], g.lon[u])) continue;
+      inside += 1;
+      if (!search.node(u)) n += 1;
+    }
+    lost += n;
+    all += inside;
+    if (n / inside > MAX_LOST_SHARE) bad.push(`${r.area}:${((100 * n) / inside).toFixed(2)}%`);
+  }
+  return { ok: !bad.length, info: `wezly nieosiagalne ${lost}/${all} = ${((100 * lost) / all).toFixed(3)}%, ponad prog: ${bad.slice(0, 6).join(" ") || "-"}` };
+});
+// Most zgubiony = w poprzednim wydaniu byl, teraz zadnego dlugiego mostu w promieniu BRIDGE_NEAR_M. Pojedynczy bywa prawdziwy
+// (remont, przebudowa), wiec tylko ostrzega miejscem; ubytek ponad MAX_BRIDGES_LOST to zepsute wejscie albo wandalizm.
+gate("bridges", "utrata mostow: ucieta siec, wandalizm", "mostu krotszego niz 80 m i drogi lokalnej", () => {
+  const cell = (la, lo) => `${Math.floor(la / 20)},${Math.floor(lo / 20)}`;
+  const grid = new Map();
+  for (const [la, lo] of graphStats.bridges) {
+    const k = cell(la, lo);
+    grid.set(k, [...(grid.get(k) || []), [la, lo]]);
+  }
+  const lost = (prev.bridges || []).filter(([la, lo]) => {
+    for (let y = -1; y <= 1; y += 1) for (let x = -1; x <= 1; x += 1) {
+      for (const [a, b] of grid.get(cell(la + y * 20, lo + x * 20)) || []) if (hav(la / 1e4, lo / 1e4, a / 1e4, b / 1e4) < BRIDGE_NEAR_M) return false;
+    }
+    return true;
+  });
+  const n = graphStats.bridges.length;
+  const info = `mosty ${n}, poprzednio ${prev.bridges?.length ?? "-"}, zgubione ${lost.length}: ${lost.slice(0, 8).map(([a, b]) => `${a / 1e4},${b / 1e4}`).join(" ") || "-"}`;
+  return { ok: n >= MIN_BRIDGES && lost.length <= MAX_BRIDGES_LOST * (prev.bridges?.length || 0), info: lost.length ? `ALARM ${info}` : info };
 });
 gate("coarse-portals", "rozjazd grafu zgrubnego z grafem miasta, siec krajowa w kawalkach", "gorsza trasa w kraju przy zachowanej spojnosci", () => {
   const rec = graphStats.results.find((r) => r.kind === "coarse");
@@ -555,8 +676,8 @@ gate("coarse-portals", "rozjazd grafu zgrubnego z grafem miasta, siec krajowa w 
     const sb = c.snapper.snap(lb, lp);
     let res = null;
     if (sa && sb) {
-      c.search.run(seedsFrom(c.g, sa));
-      res = readTarget(c.g, c.search, sb);
+      c.search.run({ snap: sa });
+      res = c.search.read(sb);
     }
     rows.push({ name, km: res ? Math.round(res[1] / 1000) : null, expectKm: km });
   }

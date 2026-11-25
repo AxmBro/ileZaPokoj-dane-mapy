@@ -1,7 +1,11 @@
 // Format pliku grafu `graph-<obszar>` (magia IZPG) i mapa zasiegu. Tylko dane OSM, licencja ODbL 1.0.
-// Strumienie: coordLat, coordLon, deg, nb, len, spd, flg + coverage (RLE bitmapy) + portals.
+// Strumienie: coordLat, coordLon, deg, nb, len, spd, flg + coverage (RLE bitmapy) + portals + bans (od formatu 2).
+// Bity flg: 1 krawedz zwrotna o tych samych parametrach, 2 kara kosztu x2, 4 autostrada lub lacznica (bez snapu).
+// Dekoder czyta strumienie po nazwie, a bity maska, wiec nowe dane dokladaja sie bez psucia starszej wtyczki;
+// zmiana znaczenia istniejacego strumienia albo bitu wymaga nowej magii.
 // Kontrakt: dekoder nie uzywa Node API poza Buffer z kontenera, wiec przenosi sie do przegladarki po podmianie unpackFile.
 import { ByteWriter, makeReader, packFile, unpackFile } from "./common.mjs";
+import { addTurns } from "./edge_search.mjs";
 
 export const COVER_DLAT = 0.005; // ok. 556 m
 export const COVER_DLON = 0.0075; // ok. 500 m na szerokosci Polski
@@ -45,8 +49,37 @@ export function coverageTest(cov, bits) {
   };
 }
 
-// edges: posortowane po (u, v), pola u, v, l (m), w (koszt s), t (czas s).
-export function encodeGraph({ n, latE5, lonE5, eu, ev, el, ew, et, m }, header, coverage, portals) {
+// Zakaz = trojka (u, v, w): jadac u -> v nie wolno v -> w. Zapis: liczba, potem po v (delta), u - v i w - v (zigzag).
+export function encodeBans(triples) {
+  const rows = [];
+  for (let i = 0; i < triples.length; i += 3) rows.push([triples[i], triples[i + 1], triples[i + 2]]);
+  rows.sort((a, b) => a[1] - b[1] || a[0] - b[0] || a[2] - b[2]);
+  const w = new ByteWriter(64 + rows.length * 5);
+  w.varint(rows.length);
+  let prev = 0;
+  for (const [u, v, x] of rows) {
+    w.varint(v - prev);
+    w.zigzag(u - v);
+    w.zigzag(x - v);
+    prev = v;
+  }
+  return w.done();
+}
+export function decodeBans(buf) {
+  const r = makeReader(buf);
+  const out = new Int32Array(r.v() * 3);
+  let v = 0;
+  for (let i = 0; i < out.length; i += 3) {
+    v += r.v();
+    out[i] = v + r.z();
+    out[i + 1] = v;
+    out[i + 2] = v + r.z();
+  }
+  return out;
+}
+
+// edges: posortowane po (u, v), pola u, v, l (m), w (koszt s), t (czas s), ns (1 = bez snapu); bans: trojki wezlow.
+export function encodeGraph({ n, latE5, lonE5, eu, ev, el, ew, et, ens, bans, m }, header, coverage, portals) {
   const coordLat = new ByteWriter(n * 2);
   const coordLon = new ByteWriter(n * 2);
   let a = 0;
@@ -83,13 +116,13 @@ export function encodeGraph({ n, latE5, lonE5, eu, ev, el, ew, et, m }, header, 
     for (let e = off[u]; e < off[u + 1]; e += 1) {
       const v = ev[e];
       const back = findBack(u, v);
-      const same = back >= 0 && Math.round(el[back]) === Math.round(el[e]) && Math.abs(ew[back] - ew[e]) < 0.5;
+      const same = back >= 0 && Math.round(el[back]) === Math.round(el[e]) && Math.abs(ew[back] - ew[e]) < 0.5 && ens[back] === ens[e];
       if (same && v < u) continue;
       nb.zigzag(v - prev);
       prev = v;
       len.varint(Math.round(el[e]));
       spd.byte(et[e] > 0 ? Math.min(255, Math.max(1, Math.round((el[e] / et[e]) * 3.6))) : 1);
-      flg.byte((same ? 1 : 0) | (ew[e] > et[e] * 1.2 ? 2 : 0));
+      flg.byte((same ? 1 : 0) | (ew[e] > et[e] * 1.2 ? 2 : 0) | (ens[e] ? 4 : 0));
       count += 1;
       if (same) both += 1;
       else oneway += 1;
@@ -114,6 +147,7 @@ export function encodeGraph({ n, latE5, lonE5, eu, ev, el, ew, et, m }, header, 
       {
         coordLat: coordLat.done(), coordLon: coordLon.done(), deg: deg.done(), nb: nb.done(), len: len.done(), spd: spd.done(), flg: flg.done(),
         coverage: coverage || Buffer.alloc(0), portals: portalW.done(),
+        bans: encodeBans(bans),
       },
     ),
     storedBoth: both,
@@ -147,6 +181,7 @@ export function decodeGraph(buf) {
   const eW = new Float32Array(m);
   const eL = new Float32Array(m);
   const eT = new Float32Array(m);
+  const eNoSnap = new Uint8Array(m);
   let c = 0;
   for (let u = 0; u < n; u += 1) {
     const d = rDeg.v();
@@ -164,6 +199,7 @@ export function decodeGraph(buf) {
       eL[c] = L;
       eT[c] = t;
       eW[c] = w;
+      eNoSnap[c] = fl & 4;
       c += 1;
       if (fl & 1) {
         eu[c] = v;
@@ -171,6 +207,7 @@ export function decodeGraph(buf) {
         eL[c] = L;
         eT[c] = t;
         eW[c] = w;
+        eNoSnap[c] = fl & 4;
         c += 1;
       }
     }
@@ -184,12 +221,14 @@ export function decodeGraph(buf) {
   const W = new Float32Array(m);
   const Ln = new Float32Array(m);
   const T = new Float32Array(m);
+  const noSnap = new Uint8Array(m);
   for (let i = 0; i < m; i += 1) {
     const q = pos[eu[i]]++;
     to[q] = ev[i];
     W[q] = eW[i];
     Ln[q] = eL[i];
     T[q] = eT[i];
+    noSnap[q] = eNoSnap[i];
   }
   const portalCount = header.portals || 0;
   const portalA = new Int32Array(portalCount);
@@ -206,5 +245,6 @@ export function decodeGraph(buf) {
     }
   }
   const covTest = header.coverage ? coverageTest(header.coverage, decodeCoverage(s.coverage, header.coverage.nx * header.coverage.ny)) : null;
-  return { header, n, m, lat, lon, off, to, W, Ln, T, portalA, portalB, covers: covTest };
+  const g = { header, n, m, lat, lon, off, to, W, Ln, T, noSnap, portalA, portalB, covers: covTest };
+  return header.format >= 2 && s.bans ? addTurns(g, decodeBans(s.bans)) : g;
 }
