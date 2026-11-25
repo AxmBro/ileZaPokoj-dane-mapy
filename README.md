@@ -20,7 +20,7 @@ Zawartość katalogu:
 |---|---|---|
 | `addr-<TERYT powiatu>.bin.gz` | punkty adresowe powiatu: miejscowość, ulica, numer, współrzędne | PRG |
 | `addr-index.json.gz` | miejscowość -> powiaty, bbox powiatów | PRG |
-| `graph-<obszar>.bin.gz` | graf dróg samochodowych obszaru (miasto, aglomeracja albo powiat) z buforem 8 km i zakazami skrętu | OSM |
+| `graph-<obszar>.bin.gz` | graf dróg samochodowych obszaru (miasto, aglomeracja albo powiat) z buforem 8 km, drogami głównymi z 17 km i zakazami skrętu | OSM |
 | `graph-coarse.bin.gz` | graf krajowy głównych dróg do tras między odległymi obszarami, z zakazami skrętu | OSM |
 | `graph-index.json.gz` | obszary i mapa zasięgu plików grafu | OSM |
 | `manifest.json` | format, źródła z datami, licencje, rozmiar i SHA-256 każdego pliku | - |
