@@ -23,6 +23,10 @@ const ISLAND_MIN_NODES = 1000; // mniejszy odciety kawalek to wjazd albo plac, n
 // Skracanie drogi do cieciwy nie moze odsunac jej od przebiegu dalej niz tyle: do cieciwy przyciaga sie punkt i z niej jest kat skretu.
 // 2654 pary wobec OSRM: p90 km 2,9 -> 2,1%, ponad 5% 5,8 -> 4,2% par; 10 m nie daje wiecej na osobnych 80 parach, pliki rosna.
 const CHORD_M = 20;
+// Drogi glowne (secondary i wyzej) z szerszego prostokata: najblizszy most bywa poza buforem 8 km i trasa na drugi brzeg byla o polowe za dluga.
+// 6536 tras nad rzekami: km ponad 5% u 29 -> 8, do 25 km 0; 0,25 nie lepiej, a pliki wieksze.
+const RING_LAT = 0.15; // ok. 17 km
+const RING_LON = 0.24;
 const BUFFER_RASTER = 0.002; // stopnie, ok. 140-220 m; rozdzielczosc wyboru drog do obszaru
 
 // 1. Wczytanie drog do tablic typowanych. Rekord: <d way id><B klasa><B flagi><f predkosc w przod><f w tyl><I n><d id * n><i lon, lat * n>.
@@ -638,7 +642,7 @@ function polygonBounds(geo) {
   }
   return [a, b, c, d];
 }
-function selectWays(geo) {
+function selectWays(geo, ring) {
   const [x0, y0, x1, y1] = polygonBounds(geo);
   const nx = Math.ceil((x1 - x0) / BUFFER_RASTER) + 1;
   const ny = Math.ceil((y1 - y0) / BUFFER_RASTER) + 1;
@@ -652,8 +656,14 @@ function selectWays(geo) {
   const b = Math.ceil(y1 * 1e7);
   const c = Math.floor(x0 * 1e7);
   const d = Math.ceil(x1 * 1e7);
+  const ringLat = RING_LAT * 1e7;
+  const ringLon = RING_LON * 1e7;
   const list = [];
   for (let w = 0; w < nw; w += 1) {
+    if (ring && wayClass[w] <= COARSE_MAX_CLASS && wMaxLat[w] > a - ringLat && wMinLat[w] < b + ringLat && wMaxLon[w] > c - ringLon && wMinLon[w] < d + ringLon) {
+      list.push(w);
+      continue;
+    }
     if (wMaxLat[w] < a || wMinLat[w] > b || wMaxLon[w] < c || wMinLon[w] > d) continue;
     for (let r = wayStart[w]; r < wayStart[w + 1]; r += 1) {
       if (inRaster(refLat[r], refLon[r])) {
@@ -778,14 +788,15 @@ if (variants) {
 variantsOut.noServiceMinor = {};
 for (const a of areas.areas) {
   const t1 = Date.now();
-  const list = selectWays(a.buffer);
+  const list = selectWays(a.buffer, true);
   const g = buildGraph(list, keepMask);
   const portals = [];
   for (let i = 0; i < g.n; i += 1) {
     const c = coarseIdxOf[g.globalIdx[i]];
     if (c >= 0) portals.push(i, c);
   }
-  const cover = coverageOf(a.coverage, g);
+  // Zasieg z samej sieci bufora: pierscien laczy drugi brzeg glowna droga, ale lokalne drogi za rzeka konczy bufor.
+  const cover = coverageOf(a.coverage, buildGraph(selectWays(a.buffer, false), keepMask));
   const rec = finish(a.slug, a.kind, g, cover, Int32Array.from(portals), { coarseSha: coarseRec.sha256, terc: a.terc });
   rec.buildMs = Date.now() - t1;
   rec.terc = a.terc;
