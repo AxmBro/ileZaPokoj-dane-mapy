@@ -33,6 +33,9 @@ const MAX_LOST_SHARE = 0.01;
 // Promien mniejszy niz odstep sasiednich mostow tej samej rzeki, wiekszy niz odstep dwoch jezdni i przesuniecie srodka po podziale drogi.
 const BRIDGE_NEAR_M = 60;
 const MAX_BRIDGES_LOST = 0.02;
+// Pomiar 2026-11 na 154 174 adresach: 22 przed obcieciem zasiegu w graph_build (`trimIslands`), 0 po nim.
+const SIDE_SAMPLE = 400;
+const MAX_WRONG_SIDE = 5e-5;
 const MIN_BRIDGES = 1000;
 const rand = rng(20261107);
 
@@ -505,6 +508,25 @@ gate("coverage-snap", "ciche wyjscie poza plik, przesuniety graf wobec adresow",
   const bad = rows.filter((x) => x.status !== x.expect);
   const farShare = inCovFar / (inCov || 1);
   return { ok: !bad.length && farShare <= 0.002, info: `punkty kontrolne ${rows.length - bad.length}/${rows.length}, adresy w zasiegu ${inCov}, snap p50 ${detail.snap.all.p50} m, p99 ${detail.snap.all.p99} m, p99.9 ${detail.snap.all.p999} m, ponad ${SNAP_MAX_M} m: ${inCovFar}` };
+});
+gate("snap-side", "plik deklaruje zasieg tam, gdzie odcial drogi (drugi brzeg rzeki): punkt przyciagniety daleko, choc sasiedni plik ma jego droge", "odciety adres lezacy w jednym tylko pliku", () => {
+  const pts = [];
+  for (const [powiat, ix] of loadAddr()) {
+    const { lat, lon, header } = ix.d;
+    const step = Math.max(1, Math.floor(header.points / SIDE_SAMPLE));
+    for (let i = 0; i < header.points; i += step) pts.push({ powiat, lat: lat[i], lon: lon[i], hits: [] });
+  }
+  for (const r of GRAPH_LIST) {
+    const a = rt(r.area);
+    for (const p of pts) if (a.g.covers(p.lat, p.lon)) p.hits.push([r.area, a.snapper.snap(p.lat, p.lon)?.distM ?? Infinity]);
+  }
+  const bad = [];
+  for (const p of pts) {
+    const best = Math.min(...p.hits.map((h) => h[1]));
+    // Dalej niz SNAP_MAX_M wtyczka i tak pokazuje szacunek.
+    for (const [area, d] of p.hits) if (d <= SNAP_MAX_M && d > Math.max(150, best * 2 + 100)) bad.push(`${area}:${p.lat.toFixed(4)},${p.lon.toFixed(4)}:${Math.round(d)}m`);
+  }
+  return { ok: bad.length / (pts.length || 1) <= MAX_WRONG_SIDE, info: `adresy ${pts.length}, przyciagniete na zla strone ${bad.length}: ${bad.slice(0, 6).join(" ") || "-"}` };
 });
 gate("graph-route", "rozspojnienie sieci po skroceniu, zly dekoder dlugosci", "dokladnosci trasy; to kontrola spojnosci, nie zgodnosc z routerem", () => {
   const ratios = [];

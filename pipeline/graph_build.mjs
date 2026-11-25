@@ -19,6 +19,7 @@ const COARSE_MAX_CLASS = 7;
 const COARSE_TERTIARY_MAX_CLASS = 9;
 const SIGNAL_S = 2;
 const NO_SNAP_MAX_CLASS = 1; // motorway, motorway_link: dom nie ma z nich wjazdu
+const ISLAND_MIN_NODES = 1000; // mniejszy odciety kawalek to wjazd albo plac, nie drugi brzeg rzeki
 const BUFFER_RASTER = 0.002; // stopnie, ok. 140-220 m; rozdzielczosc wyboru drog do obszaru
 
 // 1. Wczytanie drog do tablic typowanych. Rekord: <d way id><B klasa><B flagi><f predkosc w przod><f w tyl><I n><d id * n><i lon, lat * n>.
@@ -316,6 +317,7 @@ function buildGraph(wayList, keepMask) {
   const low = new Int32Array(N0);
   const onStack = new Uint8Array(N0);
   const comp = new Int32Array(N0).fill(-1);
+  const compSize = [];
   const stack = new Int32Array(N0);
   const cs = new Int32Array(N0);
   const ci = new Int32Array(N0);
@@ -354,6 +356,7 @@ function buildGraph(wayList, keepMask) {
             comp[w] = compCount;
             size += 1;
           } while (w !== v);
+          compSize.push(size);
           if (size > mainSize) {
             mainSize = size;
             main = compCount;
@@ -532,8 +535,10 @@ function buildGraph(wayList, keepMask) {
     lonE5[i] = Math.round(nodeLon[g] / 100);
   }
   const bans = bansOf(n, m, fu, fv, first, last, globalIdx);
+  const side = new Int8Array(N0);
+  for (let i = 0; i < N0; i += 1) side[i] = comp[i] === main ? 1 : compSize[comp[i]] >= ISLAND_MIN_NODES ? -1 : 0;
   return {
-    n, m, latE5, lonE5, eu: fu, ev: fv, el: fl, ew: fw, et: ft, ens: ns, bans: bans.triples, banStats: bans.stats, globalIdx,
+    n, m, latE5, lonE5, eu: fu, ev: fv, el: fl, ew: fw, et: ft, ens: ns, bans: bans.triples, banStats: bans.stats, globalIdx, toGlobal, side,
     rawNodes: N0, rawSegments: S, droppedBarrier, sccCount: compCount, sccMainPct: Math.round((1e4 * mainSize) / N0) / 100,
   };
 }
@@ -605,16 +610,56 @@ function selectWays(geo) {
   }
   return list;
 }
-function coverageOf(geo) {
+// Kawalek sieci odciety od reszty pliku (drugi brzeg rzeki, gdy most lezy za buforem) nie wchodzi do grafu, wiec plik nie moze
+// deklarowac tam zasiegu: punkt przeskoczylby rzeke do najblizszej drogi, ktora zostala. Komorka bez drog bierze strone
+// najblizszej komorki z drogami.
+function trimIslands(bits, lat0, lon0, nx, ny, g) {
+  const sum = new Int32Array(nx * ny);
+  let islands = false;
+  for (let i = 0; i < g.side.length; i += 1) {
+    const n = g.toGlobal[i];
+    const x = Math.floor((nodeLon[n] / 1e7 - lon0) / COVER_DLON);
+    const y = Math.floor((nodeLat[n] / 1e7 - lat0) / COVER_DLAT);
+    if (x < 0 || y < 0 || x >= nx || y >= ny) continue;
+    sum[y * nx + x] += g.side[i];
+    if (g.side[i] < 0) islands = true;
+  }
+  if (!islands) return 0;
+  const side = new Int8Array(nx * ny);
+  const queue = [];
+  for (let c = 0; c < side.length; c += 1) {
+    side[c] = Math.sign(sum[c]);
+    if (side[c]) queue.push(c);
+  }
+  for (let q = 0; q < queue.length; q += 1) {
+    const c = queue[q];
+    const x = c % nx;
+    for (const t of [x > 0 ? c - 1 : -1, x < nx - 1 ? c + 1 : -1, c - nx, c + nx]) {
+      if (t < 0 || t >= side.length || side[t]) continue;
+      side[t] = side[c];
+      queue.push(t);
+    }
+  }
+  let cut = 0;
+  for (let c = 0; c < side.length; c += 1) {
+    if (bits[c] && side[c] < 0) {
+      bits[c] = 0;
+      cut += 1;
+    }
+  }
+  return cut;
+}
+function coverageOf(geo, g) {
   const [x0, y0, x1, y1] = polygonBounds(geo);
   const lat0 = Math.floor(y0 / COVER_DLAT) * COVER_DLAT;
   const lon0 = Math.floor(x0 / COVER_DLON) * COVER_DLON;
   const nx = Math.ceil((x1 - lon0) / COVER_DLON);
   const ny = Math.ceil((y1 - lat0) / COVER_DLAT);
   const bits = rasterize(geo, lat0, lon0, COVER_DLAT, COVER_DLON, nx, ny);
+  const cut = trimIslands(bits, lat0, lon0, nx, ny, g);
   let set = 0;
   for (let i = 0; i < bits.length; i += 1) set += bits[i];
-  return { meta: { lat0: +lat0.toFixed(4), lon0: +lon0.toFixed(4), dLat: COVER_DLAT, dLon: COVER_DLON, nx, ny, cellsSet: set }, encoded: encodeCoverage(bits) };
+  return { meta: { lat0: +lat0.toFixed(4), lon0: +lon0.toFixed(4), dLat: COVER_DLAT, dLon: COVER_DLON, nx, ny, cellsSet: set }, cut, encoded: encodeCoverage(bits) };
 }
 
 const areas = readJson(areasFile);
@@ -645,7 +690,7 @@ function finish(slug, kind, g, cover, portals, extra = {}) {
   const rec = {
     file: name, area: slug, kind, nodes: g.n, edges: g.m, rawNodes: g.rawNodes, rawSegments: g.rawSegments, droppedBarrier: g.droppedBarrier,
     bans: g.bans.length / 3, banStats: g.banStats, sccCount: g.sccCount, sccMainPct: g.sccMainPct, raw: file.length, gzip: gz.length, sha256: sha256(gz), storedBoth, storedOneway,
-    portals: portals ? portals.length / 2 : 0, coverageBytes: cover ? cover.encoded.length : 0, coverageCells: cover ? cover.meta.cellsSet : 0,
+    portals: portals ? portals.length / 2 : 0, coverageBytes: cover ? cover.encoded.length : 0, coverageCells: cover ? cover.meta.cellsSet : 0, coverageCut: cover ? cover.cut : 0,
     coverage: cover ? { ...cover.meta, rle: cover.encoded.toString("base64") } : null,
   };
   results.push(rec);
@@ -686,7 +731,7 @@ for (const a of areas.areas) {
     const c = coarseIdxOf[g.globalIdx[i]];
     if (c >= 0) portals.push(i, c);
   }
-  const cover = coverageOf(a.coverage);
+  const cover = coverageOf(a.coverage, g);
   const rec = finish(a.slug, a.kind, g, cover, Int32Array.from(portals), { coarseSha: coarseRec.sha256, terc: a.terc });
   rec.buildMs = Date.now() - t1;
   rec.terc = a.terc;
@@ -695,7 +740,7 @@ for (const a of areas.areas) {
     const { file } = encodeGraph(g2, { format: 2, area: a.slug }, cover.encoded, null);
     variantsOut.noServiceMinor[a.slug] = { nodes: g2.n, edges: g2.m, raw: file.length, gzip: gzip(file).length };
   }
-  log(`${a.slug}: drogi ${list.length}, wezly ${g.n}, krawedzie ${g.m}, gzip ${rec.gzip}, portale ${rec.portals}, SCC ${g.sccMainPct}%, ${rec.buildMs} ms`);
+  log(`${a.slug}: drogi ${list.length}, wezly ${g.n}, krawedzie ${g.m}, gzip ${rec.gzip}, portale ${rec.portals}, SCC ${g.sccMainPct}%, zasieg obciety o ${cover.cut} komorek, ${rec.buildMs} ms`);
 }
 // Pomiar odniesienia, bez zapisu do publikacji: siec aut calego kraju jako jeden plik i jako 380 plikow powiatowych.
 const powiatsArg = opts.find((o) => o.startsWith("--powiats="))?.slice(10);

@@ -7,7 +7,7 @@ import zlib from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { gzip, packFile, readJson, rng, sha256, unpackFile, writeJson } from "./common.mjs";
-import { decodeBans, decodeGraph, encodeBans } from "./graph_format.mjs";
+import { decodeBans, decodeGraph, encodeBans, encodeCoverage } from "./graph_format.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const [good, counts, tmp] = process.argv.slice(2);
@@ -22,19 +22,26 @@ function fresh(name) {
   fs.copyFileSync(path.join(good, "osm", "boundaries.json"), path.join(dir, "osm", "boundaries.json"));
   return dir;
 }
-// Przepisuje plik grafu w stage (i hash w manifescie) po zmianie zakazow.
-function rewriteBans(dir, rec, change) {
+// Przepisuje strumienie pliku grafu w stage (i hash w manifescie).
+function rewriteStreams(dir, rec, change) {
   const p = path.join(dir, "stage", rec.file);
   const raw = zlib.gunzipSync(fs.readFileSync(p));
   const { header, streams } = unpackFile(raw, "IZPG");
-  const triples = change(Array.from(decodeBans(streams.bans)), decodeGraph(raw));
+  const changed = change(streams, header, raw);
   delete header.streams;
-  const buf = gzip(packFile("IZPG", header, { ...streams, bans: encodeBans(triples) }));
+  const buf = gzip(packFile("IZPG", header, { ...streams, ...changed }));
   fs.writeFileSync(p, buf);
   const mf = path.join(dir, "stage", "manifest.json");
   const m = readJson(mf);
   Object.assign(m.files.find((f) => f.name === rec.file), { size: buf.length, sha256: sha256(buf) });
   writeJson(mf, m);
+}
+function rewriteBans(dir, rec, change) {
+  let triples;
+  rewriteStreams(dir, rec, (streams, header, raw) => {
+    triples = change(Array.from(decodeBans(streams.bans)), decodeGraph(raw));
+    return { bans: encodeBans(triples) };
+  });
   return triples.length / 3;
 }
 const editStats = (dir, fn) => {
@@ -73,6 +80,9 @@ const SCENARIOS = {
       return t;
     });
     editStats(dir, (s) => { s.results.find((x) => x.area === biggest.area).bans = left; });
+  } },
+  "zasieg-za-rzeka": { gate: "snap-side", make: (dir) => {
+    for (const r of stats0.results) if (r.coverageCut) rewriteStreams(dir, r, (streams, h) => ({ coverage: encodeCoverage(new Uint8Array(h.coverage.nx * h.coverage.ny).fill(1)) }));
   } },
   "ubytek-mostow": { gate: "bridges", make: (dir) => editStats(dir, (s) => { s.bridges = s.bridges.filter((b, i) => i % 25); }) },
   "jeden-most-ostrzega": { gate: "bridges", expectOk: true, expectText: "ALARM", make: (dir) => editStats(dir, (s) => {
