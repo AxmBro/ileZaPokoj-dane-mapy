@@ -37,7 +37,9 @@ jobs:
   build:
     needs: check
     if: needs.check.outputs.skip != '1'
-    runs-on: ubuntu-latest
+    # ARM, bo runnery x64 bywaja w sieci Amazona, ktorej czesc Geofabrik odrzuca (3.42.157.0/24: 1 z 40 runnerow, 2 z 9
+    # naszych przebiegow, pomiar 2026-11-25); ARM sa tylko w Azure, 22 z 22 polaczone.
+    runs-on: ubuntu-24.04-arm
     # Grafy wszystkich powiatow i ich bramki; czas przebiegu 2026-11-24 w README.
     timeout-minutes: 240
     env:

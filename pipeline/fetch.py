@@ -5,7 +5,9 @@
 # Bez petli ponowien poza `fetch_once` - Geofabrik blokuje zakresy IP za agresywne pobieranie.
 import hashlib, json, os, sys, time, urllib.error, urllib.request
 
-GEOFABRIK = 'https://download.geofabrik.de/europe/'
+# Geofabrik przenosi kraje do wlasnych folderow (2026-11): nowy adres pierwszy, stary zapasowo. Suma `.md5` spod adresu po
+# przekierowaniach, bo stary `.md5` bywal z innego pliku.
+GEOFABRIK = ('https://download.geofabrik.de/europe/poland/', 'https://download.geofabrik.de/europe/')
 # Geofabrik bywa przeciazony minutami: 6 prob to ok. 7,5 min czekania, a nie utrata pobranych 2,1 GB przez plik 60 B.
 ATTEMPTS = 6
 UA = {'User-Agent': 'ileZaPokoj-data-pipeline/1.0 (monthly data build)'}
@@ -22,6 +24,7 @@ def with_retry(fn, url):
         except OSError as e:
             if attempt == ATTEMPTS:
                 raise
+            # Natychmiastowa odmowa we wszystkich probach = siec runnera na liscie blokad Geofabrik; pomaga tylko nowy runner.
             print(f'{url}: proba {attempt}: {e}', flush=True)
             time.sleep(30 * attempt)
 
@@ -30,7 +33,7 @@ def head(url):
     def once():
         req = urllib.request.Request(url, method='HEAD', headers=UA)
         with urllib.request.urlopen(req, timeout=60) as r:
-            return int(r.headers.get('Content-Length') or 0), r.headers.get('Last-Modified') or '', r.headers.get('ETag') or ''
+            return int(r.headers.get('Content-Length') or 0), r.headers.get('Last-Modified') or '', r.headers.get('ETag') or '', r.geturl()
     return with_retry(once, url)
 
 
@@ -42,13 +45,12 @@ def osm_month_url():
         y, m = t.tm_year, t.tm_mon - back
         if m < 1:
             y, m = y - 1, 12
-        url = f'{GEOFABRIK}poland-{y % 100:02d}{m:02d}01.osm.pbf'
-        try:
-            head(url)
-            return url, True
-        except urllib.error.HTTPError as e:
-            if e.code != 404:
-                raise
+        for base in GEOFABRIK:
+            try:
+                return head(f'{base}poland-{y % 100:02d}{m:02d}01.osm.pbf')[3], True
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise
     raise SystemExit('brak miesiecznego pliku Polski na Geofabrik (biezacy i poprzedni miesiac)')
 
 
@@ -98,7 +100,7 @@ def fetch_once(url, part, etag, size):
 
 
 def get(url, dst, has_md5):
-    size, modified, etag = head(url)
+    size, modified, etag, _ = head(url)
     meta = {'url': url, 'size': size, 'lastModified': modified, 'etag': etag}
     # Plik w dl z innego zrodla (inny miesiac) o tym samym rozmiarze nie moze przejsc jako "jest".
     stamp = dst + '.url'
