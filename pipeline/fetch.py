@@ -15,12 +15,16 @@ UA = {'User-Agent': 'ileZaPokoj-data-pipeline/1.0 (monthly data build)'}
 
 def with_retry(fn, url):
     """Krotkie zapytanie kontrolne (HEAD, `.md5`) z ATTEMPTS probami: chwilowy blad sieci runnera (np. `Network is
-    unreachable`) nie moze przerwac budowy po kilkunastu minutach pobierania. HTTP 4xx/5xx przechodzi od razu."""
+    unreachable`) ani przeciazenie Geofabrik (HTTP 5xx, 429) nie moze przerwac budowy po kilkunastu minutach pobierania.
+    Pozostale HTTP 4xx (np. 403 = blokada, 404 = zly adres) przechodza od razu."""
     for attempt in range(1, ATTEMPTS + 1):
         try:
             return fn()
-        except urllib.error.HTTPError:
-            raise
+        except urllib.error.HTTPError as e:
+            if (e.code < 500 and e.code != 429) or attempt == ATTEMPTS:
+                raise
+            print(f'{url}: proba {attempt}: {e}', flush=True)
+            time.sleep(30 * attempt)
         except OSError as e:
             if attempt == ATTEMPTS:
                 raise
